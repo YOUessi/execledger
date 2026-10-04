@@ -6,7 +6,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
 
-from execledger.models import EffectRecord, ExecutionRecord, ExecutionSpec, SnapshotRecord, SubmitResult
+from execledger.models import (
+    EffectRecord,
+    ExecutionRecord,
+    ExecutionSpec,
+    SnapshotRecord,
+    SubmitResult,
+)
 from execledger.service import ExecutionService
 from execledger.store import IdempotencyConflict
 
