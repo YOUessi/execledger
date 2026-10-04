@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Annotated
+
+from pydantic import BaseModel, Field, field_validator
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class ExecutionStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+    CANCELLED = "CANCELLED"
+    INTERRUPTED = "INTERRUPTED"
+
+
+TERMINAL_STATUSES = {
+    ExecutionStatus.SUCCEEDED,
+    ExecutionStatus.FAILED,
+    ExecutionStatus.TIMED_OUT,
+    ExecutionStatus.CANCELLED,
+    ExecutionStatus.INTERRUPTED,
+}
+
+
+class ExecutionSpec(BaseModel):
+    argv: Annotated[list[str], Field(min_length=1, max_length=64)]
+    env: dict[str, str] = Field(default_factory=dict)
+    files: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: Annotated[float, Field(gt=0, le=3600)] = 60.0
+    max_output_bytes: Annotated[int, Field(ge=1024, le=4 * 1024 * 1024)] = 256 * 1024
+
+    @field_validator("argv")
+    @classmethod
+    def validate_argv(cls, value: list[str]) -> list[str]:
+        if any(not item or "\x00" in item for item in value):
+            raise ValueError("argv entries must be non-empty and NUL-free")
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def validate_env(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, item in value.items():
+            if not key or "=" in key or "\x00" in key or "\x00" in item:
+                raise ValueError("invalid environment entry")
+        return value
+
+
+class ExecutionRecord(BaseModel):
+    id: str
+    status: ExecutionStatus
+    spec: ExecutionSpec
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    attempt: int = 0
+    cancel_requested: bool = False
+
+
+class EffectRecord(BaseModel):
+    seq: int
+    execution_id: str
+    created_at: datetime
+    kind: str
+    payload: dict[str, object]
+
+
+class SnapshotRecord(BaseModel):
+    id: str
+    execution_id: str
+    phase: str
+    created_at: datetime
+    digest: str
+    manifest: list[dict[str, object]]
+
+
+class SubmitResult(BaseModel):
+    execution: ExecutionRecord
+    created: bool
