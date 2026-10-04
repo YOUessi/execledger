@@ -114,3 +114,47 @@ def test_api_exposes_attempt_history(tmp_path: Path):
         assert payload[0]["number"] == 1
         assert payload[0]["worker_id"] == "api-worker/0"
         assert payload[0]["status"] == "SUCCEEDED"
+
+
+def test_api_diff_and_restore_snapshot(tmp_path: Path):
+    app = create_app(tmp_path, workers=1)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/executions",
+            headers={"Idempotency-Key": "restore-api-key"},
+            json={
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "Path('input.txt').write_text('changed'); "
+                        "Path('created.txt').write_text('new')"
+                    ),
+                ],
+                "files": {"input.txt": "original"},
+            },
+        )
+        execution_id = created.json()["execution"]["id"]
+        assert _wait_terminal(client, execution_id)["status"] == "SUCCEEDED"
+
+        snapshots = client.get(f"/v1/executions/{execution_id}/snapshots").json()
+        assert [item["phase"] for item in snapshots] == ["before", "after"]
+        before, after = snapshots
+
+        diff = client.get(
+            f"/v1/executions/{execution_id}/diff",
+            params={"before": before["id"], "after": after["id"]},
+        )
+        assert diff.status_code == 200
+        changes = diff.json()
+        assert [item["path"] for item in changes["added"]] == ["created.txt"]
+        assert [item["path"] for item in changes["modified"]] == ["input.txt"]
+
+        restored = client.post(
+            f"/v1/executions/{execution_id}/snapshots/{before['id']}/restore"
+        )
+        assert restored.status_code == 200
+        restore_root = Path(restored.json()["directory"])
+        assert (restore_root / "input.txt").read_text() == "original"
+        assert not (restore_root / "created.txt").exists()

@@ -41,3 +41,20 @@ def test_record_logs_can_select_stream(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "err\n"
+
+
+def test_cli_snapshot_diff_and_restore_parsers():
+    diff_args = build_parser().parse_args(
+        ["diff", "execution-1", "before-1", "after-1"]
+    )
+    assert diff_args.command == "diff"
+    assert diff_args.execution_id == "execution-1"
+    assert diff_args.before_snapshot_id == "before-1"
+    assert diff_args.after_snapshot_id == "after-1"
+
+    restore_args = build_parser().parse_args(
+        ["restore", "execution-1", "snapshot-1"]
+    )
+    assert restore_args.command == "restore"
+    assert restore_args.execution_id == "execution-1"
+    assert restore_args.snapshot_id == "snapshot-1"

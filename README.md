@@ -19,7 +19,7 @@ Agent workflows fail in more ways than “the command returned non-zero”:
 
 ExecLedger turns those failure modes into explicit control-plane state: idempotency, leases, attempts, process-tree ownership, durable effect logs, resumable event streams, and workspace snapshots.
 
-## Implemented in v0.3
+## Implemented in v0.4
 
 ### Durable execution state
 
@@ -55,7 +55,11 @@ ExecLedger turns those failure modes into explicit control-plane state: idempote
 - Resumable Server-Sent Events using the durable effect sequence as the SSE event id.
 - `Last-Event-ID` and explicit sequence cursors are supported.
 - Deterministic before/after workspace manifests with SHA-256 file hashes.
-- REST endpoint and CLI access to attempt history, effect history and snapshots.
+- Snapshot file bytes stored in a local content-addressed SHA-256 blob store.
+- Identical snapshot contents deduplicated by digest.
+- Workspace diffs report added, modified and deleted files between any two snapshots.
+- Snapshots can be restored into a new server-managed directory without mutating execution history.
+- REST endpoint and CLI access to attempt history, effect history, snapshots, diffs and restores.
 
 ### Operator interfaces
 
@@ -94,6 +98,8 @@ execledger follow EXECUTION_ID --events
 execledger attempts EXECUTION_ID
 execledger effects EXECUTION_ID
 execledger snapshots EXECUTION_ID
+execledger diff EXECUTION_ID BEFORE_SNAPSHOT_ID AFTER_SNAPSHOT_ID
+execledger restore EXECUTION_ID SNAPSHOT_ID
 execledger cancel EXECUTION_ID
 ```
 
@@ -147,7 +153,8 @@ src/execledger/
   runner.py     worker leases + process lifecycle + output capture
   service.py    service orchestration
   store.py      SQLite state, migrations, leases, attempts and evidence
-  workspace.py  path safety + workspace snapshots
+  workspace.py  path safety + snapshot/diff/restore logic
+  blobstore.py  content-addressed snapshot bytes
 
 tests/          unit, integration and multiprocess regression tests
 docs/           architecture and explicit guarantees/limits
@@ -161,3 +168,37 @@ ExecLedger does not pretend that a directory is a secure sandbox. For hostile or
 v0.3 deliberately does **not** claim automatic retry or exactly-once external side effects. Lease expiry fences stale terminal writes and records the attempt as interrupted, but retry policy remains an explicit future feature because replaying arbitrary commands can duplicate external effects.
 
 Other planned reliability work includes content-addressed/restorable snapshots, artifact retention/GC, richer schema migration tooling, and policy-driven retry/backoff.
+
+
+## Restorable snapshots
+
+Every before/after snapshot stores a manifest and also persists each regular file's bytes in the state-root blob store:
+
+```text
+.state/
+  execledger.sqlite3
+  workspaces/
+  blobs/
+    ab/
+      ab...<sha256>
+  restores/
+    <restore-id>/
+```
+
+Blob identity is the SHA-256 of the bytes, so unchanged files across executions and snapshots are stored once.
+
+Compare two snapshots:
+
+```bash
+execledger diff EXECUTION_ID BEFORE_SNAPSHOT_ID AFTER_SNAPSHOT_ID
+```
+
+Restore a historical snapshot into a new directory:
+
+```bash
+execledger restore EXECUTION_ID SNAPSHOT_ID
+```
+
+Restore never overwrites the original execution workspace. The snapshot manifest digest, every relative path, every blob digest and every restored byte count are validated before a restore is considered successful.
+
+Snapshots created by older ExecLedger releases remain readable as evidence manifests. If their underlying bytes were never written to the new blob store, restore fails explicitly rather than fabricating content.

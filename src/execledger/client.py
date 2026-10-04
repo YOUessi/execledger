@@ -13,8 +13,10 @@ from execledger.models import (
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
+    RestoreRecord,
     SnapshotRecord,
     SubmitResult,
+    WorkspaceDiff,
 )
 
 
@@ -180,6 +182,31 @@ class ExecLedgerClient:
             f"/v1/executions/{urllib.parse.quote(execution_id)}/snapshots",
         )
         return [SnapshotRecord.model_validate(item) for item in value]
+
+    def diff(
+        self,
+        execution_id: str,
+        before_snapshot_id: str,
+        after_snapshot_id: str,
+    ) -> WorkspaceDiff:
+        quoted = urllib.parse.quote(execution_id)
+        query = urllib.parse.urlencode(
+            {
+                "before": before_snapshot_id,
+                "after": after_snapshot_id,
+            }
+        )
+        value = self._request("GET", f"/v1/executions/{quoted}/diff?{query}")
+        return WorkspaceDiff.model_validate(value)
+
+    def restore(self, execution_id: str, snapshot_id: str) -> RestoreRecord:
+        execution = urllib.parse.quote(execution_id)
+        snapshot = urllib.parse.quote(snapshot_id)
+        value = self._request(
+            "POST",
+            f"/v1/executions/{execution}/snapshots/{snapshot}/restore",
+        )
+        return RestoreRecord.model_validate(value)
 
     def wait(
         self,

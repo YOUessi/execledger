@@ -129,7 +129,7 @@ Last-Event-ID: <seq>
 
 Reconnection resumes strictly after the last committed sequence.
 
-## Workspace snapshots
+## Workspace snapshots and blob storage
 
 Before and after execution, ExecLedger records a sorted manifest of regular files containing:
 
@@ -139,7 +139,34 @@ Before and after execution, ExecLedger records a sorted manifest of regular file
 
 The complete manifest also receives a SHA-256 digest. Symlinks are excluded from snapshot traversal.
 
-Current snapshots are evidence manifests rather than backups; file bytes are not yet copied into a content-addressed object store.
+v0.4 also stores each regular file's bytes in a local content-addressed blob store. The digest is the object key, so identical contents across snapshots are deduplicated automatically. Blob writes use a temporary file, fsync, and atomic replace; an existing object is re-hashed before it is trusted.
+
+Snapshot metadata remains in SQLite while object bytes live beneath the state root. This separation keeps database rows compact while making snapshots restorable.
+
+### Diff
+
+A workspace diff validates both manifests and compares paths by digest/size. It reports:
+
+- added files,
+- modified files,
+- deleted files.
+
+The diff is metadata-only and does not mutate either historical snapshot.
+
+### Restore
+
+Restore always targets a newly generated server-controlled directory. It never overwrites the original execution workspace.
+
+Before materializing files, ExecLedger verifies:
+
+- the snapshot manifest digest,
+- manifest item structure,
+- relative path safety,
+- duplicate paths,
+- blob existence and content digest,
+- stored byte size.
+
+A partially failed restore is removed. Historical snapshots created before blob persistence remain readable, but an attempted restore fails explicitly when their object bytes are unavailable.
 
 ## Database migration
 
@@ -172,7 +199,6 @@ It does not yet provide:
 - policy-driven automatic retry/backoff,
 - exactly-once arbitrary external effects,
 - multi-host consensus,
-- restorable snapshot bytes,
 - artifact retention/garbage collection,
 - hostile-code sandboxing.
 

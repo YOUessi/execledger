@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+- Added a local SHA-256 content-addressed blob store for snapshot file bytes.
+- Snapshot creation now persists restorable content while deduplicating identical files by digest.
+- Added manifest-integrity validation before diff and restore operations.
+- Added workspace diff reporting for added, modified and deleted files.
+- Added snapshot restore into a new server-managed directory without mutating execution history.
+- Added path-safety, duplicate-path, missing-blob, size and corruption checks for restore.
+- Added REST, Python client and CLI surfaces for snapshot diff and restore.
+- Preserved readability of legacy hash-only snapshots while reporting them as non-restorable when bytes are unavailable.
+- Added blob-store, restore round-trip, diff, corruption and path-traversal tests.
+
 ## 0.3.0
 
 - Added durable worker leases with persisted owner identity, opaque lease token, heartbeat and expiry.

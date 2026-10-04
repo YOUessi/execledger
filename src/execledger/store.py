@@ -697,6 +697,27 @@ class ExecutionStore:
             manifest=manifest,
         )
 
+    def get_snapshot(self, execution_id: str, snapshot_id: str) -> SnapshotRecord:
+        self.get(execution_id)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM snapshots
+                WHERE execution_id = ? AND id = ?
+                """,
+                (execution_id, snapshot_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(snapshot_id)
+        return SnapshotRecord(
+            id=row["id"],
+            execution_id=row["execution_id"],
+            phase=row["phase"],
+            created_at=row["created_at"],
+            digest=row["digest"],
+            manifest=json.loads(row["manifest_json"]),
+        )
+
     def snapshots(self, execution_id: str) -> list[SnapshotRecord]:
         self.get(execution_id)
         with self._lock:

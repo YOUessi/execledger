@@ -98,6 +98,31 @@ class SnapshotRecord(BaseModel):
     manifest: list[dict[str, object]]
 
 
+class FileChange(BaseModel):
+    path: str
+    before_sha256: str | None = None
+    after_sha256: str | None = None
+    before_size: int | None = None
+    after_size: int | None = None
+
+
+class WorkspaceDiff(BaseModel):
+    before_snapshot_id: str
+    after_snapshot_id: str
+    added: list[FileChange]
+    modified: list[FileChange]
+    deleted: list[FileChange]
+
+
+class RestoreRecord(BaseModel):
+    id: str
+    execution_id: str
+    snapshot_id: str
+    directory: str
+    file_count: int
+    snapshot_digest: str
+
+
 class SubmitResult(BaseModel):
     execution: ExecutionRecord
     created: bool

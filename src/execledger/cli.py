@@ -94,6 +94,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_url(snapshots)
     snapshots.add_argument("execution_id")
 
+    diff = sub.add_parser("diff", help="Compare two workspace snapshots")
+    _add_url(diff)
+    diff.add_argument("execution_id")
+    diff.add_argument("before_snapshot_id")
+    diff.add_argument("after_snapshot_id")
+
+    restore = sub.add_parser("restore", help="Restore a snapshot into a new read-only-history copy")
+    _add_url(restore)
+    restore.add_argument("execution_id")
+    restore.add_argument("snapshot_id")
+
     logs = sub.add_parser("logs", help="Print captured stdout/stderr")
     _add_url(logs)
     logs.add_argument("execution_id")
@@ -207,6 +218,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "snapshots":
         _json(client.snapshots(args.execution_id))
+        return 0
+
+    if args.command == "diff":
+        _json(
+            client.diff(
+                args.execution_id,
+                args.before_snapshot_id,
+                args.after_snapshot_id,
+            )
+        )
+        return 0
+
+    if args.command == "restore":
+        _json(client.restore(args.execution_id, args.snapshot_id))
         return 0
 
     if args.command == "logs":
