@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from execledger.models import (
     TERMINAL_STATUSES,
@@ -51,8 +52,18 @@ def create_app(
             await service.stop()
             service.store.close()
 
-    app = FastAPI(title="ExecLedger", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="ExecLedger", version="0.5.0", lifespan=lifespan)
     app.state.service = service
+
+    @app.get("/", include_in_schema=False)
+    async def root():
+        return RedirectResponse(url="/ui/")
+
+    app.mount(
+        "/ui",
+        StaticFiles(directory=Path(__file__).with_name("web"), html=True),
+        name="ui",
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
