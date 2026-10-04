@@ -62,7 +62,8 @@ def test_sse_stream_is_resumable_from_effect_sequence(tmp_path: Path):
 
         with client.stream(
             "GET",
-            f"/v1/executions/{execution_id}/events?after={cursor}",
+            f"/v1/executions/{execution_id}/events",
+            headers={"Last-Event-ID": str(cursor)},
         ) as response:
             assert response.status_code == 200
             body = "\n".join(response.iter_lines())
@@ -70,3 +71,20 @@ def test_sse_stream_is_resumable_from_effect_sequence(tmp_path: Path):
         assert f"id: {cursor}" not in body
         assert "event: execution_finished" in body
         assert "data:" in body
+
+
+def test_sse_rejects_invalid_last_event_id(tmp_path: Path):
+    app = create_app(tmp_path, workers=1)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/executions",
+            headers={"Idempotency-Key": "invalid-cursor-key"},
+            json={"argv": [sys.executable, "-c", "print('ok')"]},
+        )
+        execution_id = created.json()["execution"]["id"]
+        response = client.get(
+            f"/v1/executions/{execution_id}/events",
+            headers={"Last-Event-ID": "not-an-integer"},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "invalid Last-Event-ID"
