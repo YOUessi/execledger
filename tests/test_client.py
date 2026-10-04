@@ -31,6 +31,25 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/executions/missing":
             self._send(404, {"detail": "execution not found"})
             return
+        if self.path == "/v1/executions/ex-1/events?after=0":
+            payload = {
+                "seq": 7,
+                "execution_id": "ex-1",
+                "created_at": "2026-01-01T00:00:01Z",
+                "kind": "execution_finished",
+                "payload": {"status": "SUCCEEDED", "exit_code": 0},
+            }
+            body = (
+                "id: 7\n"
+                "event: execution_finished\n"
+                f"data: {json.dumps(payload)}\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/v1/executions/ex-1":
             self._send(
                 200,
@@ -86,3 +105,12 @@ def test_client_surfaces_api_detail(api_url: str):
         client.get("missing")
     assert captured.value.status == 404
     assert captured.value.detail == "execution not found"
+
+
+def test_client_decodes_sse_effects(api_url: str):
+    client = ExecLedgerClient(api_url)
+    events = list(client.iter_events("ex-1"))
+    assert len(events) == 1
+    assert events[0].seq == 7
+    assert events[0].kind == "execution_finished"
+    assert events[0].payload["status"] == "SUCCEEDED"
