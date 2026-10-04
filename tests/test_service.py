@@ -209,3 +209,21 @@ async def test_cancel_terminates_child_process_group(tmp_path: Path):
     finally:
         await service.stop()
         service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_executable_fails_without_crashing_worker(tmp_path: Path):
+    service = ExecutionService(tmp_path, workers=1)
+    await service.start()
+    try:
+        result = await service.submit(
+            ExecutionSpec(argv=["definitely-not-an-execledger-command"]),
+            "missing-command-key",
+        )
+        final = await service.wait_terminal(result.execution.id)
+        assert final.status == ExecutionStatus.FAILED
+        assert final.exit_code is None
+        assert final.stderr
+    finally:
+        await service.stop()
+        service.store.close()
