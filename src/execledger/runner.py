@@ -64,6 +64,16 @@ class ExecutionRunner:
                 except TimeoutError:
                     pass
                 continue
+            if self._stopping.is_set():
+                self.store.add_effect(record.id, "shutdown_before_launch", {"worker": worker_id})
+                self.store.finish(
+                    record.id,
+                    ExecutionStatus.INTERRUPTED,
+                    exit_code=None,
+                    stdout="",
+                    stderr="",
+                )
+                continue
             self.store.add_effect(record.id, "worker_assigned", {"worker": worker_id})
             await self._execute(record)
 
@@ -130,6 +140,10 @@ class ExecutionRunner:
                 start_new_session=os.name == "posix",
             )
             self._processes[execution_id] = process
+            if self._stopping.is_set():
+                self._shutdown_ids.add(execution_id)
+                self.store.add_effect(execution_id, "shutdown_interruption_requested", {})
+                self._terminate(process)
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     process.communicate(), timeout=spec.timeout_seconds
