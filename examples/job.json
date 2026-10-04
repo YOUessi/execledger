@@ -1,0 +1,6 @@
+{
+  "argv": ["python", "-c", "from pathlib import Path; print(Path('input.txt').read_text()); Path('result.txt').write_text('ok')"],
+  "files": {"input.txt": "hello from ExecLedger"},
+  "timeout_seconds": 10,
+  "max_output_bytes": 65536
+}
