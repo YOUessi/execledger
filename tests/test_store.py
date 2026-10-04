@@ -60,3 +60,17 @@ def test_recovery_marks_running_as_interrupted(tmp_path: Path):
     assert store.get(record.id).status == ExecutionStatus.INTERRUPTED
     assert store.effects(record.id)[-1].kind == "recovered_as_interrupted"
     store.close()
+
+
+def test_effects_after_resumes_from_sequence(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    record, _ = store.create_execution(ExecutionSpec(argv=["echo", "ok"]), "effects-key")
+    store.add_effect(record.id, "first", {"value": 1})
+    store.add_effect(record.id, "second", {"value": 2})
+    effects = store.effects(record.id)
+    cursor = next(effect.seq for effect in effects if effect.kind == "first")
+
+    resumed = store.effects_after(record.id, cursor)
+    assert [effect.kind for effect in resumed] == ["second"]
+    assert resumed[0].payload == {"value": 2}
+    store.close()

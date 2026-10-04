@@ -323,11 +323,26 @@ class ExecutionStore:
             )
 
     def effects(self, execution_id: str) -> list[EffectRecord]:
+        return self.effects_after(execution_id)
+
+    def effects_after(
+        self,
+        execution_id: str,
+        after_seq: int = 0,
+        *,
+        limit: int = 1000,
+    ) -> list[EffectRecord]:
         self.get(execution_id)
+        limit = max(1, min(limit, 5000))
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM effects WHERE execution_id = ? ORDER BY seq ASC",
-                (execution_id,),
+                """
+                SELECT * FROM effects
+                WHERE execution_id = ? AND seq > ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (execution_id, after_seq, limit),
             ).fetchall()
         return [
             EffectRecord(
