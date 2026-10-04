@@ -51,7 +51,7 @@ class ExecutionRunner:
     async def cancel(self, execution_id: str) -> ExecutionRecord:
         record = self.store.request_cancel(execution_id)
         process = self._processes.get(execution_id)
-        if process is not None and process.returncode is None:
+        if process is not None:
             self._terminate(process)
         return record
 
@@ -78,45 +78,82 @@ class ExecutionRunner:
             await self._execute(record)
 
     @staticmethod
-    def _limit(raw: bytes, limit: int) -> tuple[str, bool]:
-        truncated = len(raw) > limit
-        data = raw[:limit]
-        return data.decode("utf-8", errors="replace"), truncated
-
-    @staticmethod
     def _terminate(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
         if os.name == "posix":
             try:
                 os.killpg(process.pid, signal.SIGTERM)
-                return
             except ProcessLookupError:
-                return
-        process.terminate()
+                pass
+            return
+        if process.returncode is None:
+            process.terminate()
 
     @staticmethod
     def _kill(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
         if os.name == "posix":
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-                return
             except ProcessLookupError:
-                return
-        process.kill()
+                pass
+            return
+        if process.returncode is None:
+            process.kill()
 
-    async def _terminate_and_collect(
-        self,
-        process: asyncio.subprocess.Process,
-    ) -> tuple[bytes, bytes]:
+    async def _terminate_and_wait(self, process: asyncio.subprocess.Process) -> None:
         self._terminate(process)
+        if process.returncode is not None:
+            return
         try:
-            return await asyncio.wait_for(process.communicate(), timeout=2)
+            await asyncio.wait_for(process.wait(), timeout=2)
         except TimeoutError:
             self._kill(process)
-            return await process.communicate()
+            await process.wait()
+
+    async def _drain_stream(
+        self,
+        execution_id: str,
+        stream: str,
+        reader: asyncio.StreamReader,
+        limit: int,
+        captured: bytearray,
+        state: dict[str, bool],
+    ) -> None:
+        while True:
+            chunk = await reader.read(8192)
+            if not chunk:
+                return
+            remaining = max(0, limit - len(captured))
+            accepted = chunk[:remaining]
+            if accepted:
+                captured.extend(accepted)
+                self.store.add_effect(
+                    execution_id,
+                    "output_chunk",
+                    {
+                        "stream": stream,
+                        "data": accepted.decode("utf-8", errors="replace"),
+                        "bytes": len(accepted),
+                    },
+                )
+            if len(accepted) < len(chunk):
+                state["truncated"] = True
+
+    async def _finish_streams(
+        self,
+        execution_id: str,
+        tasks: list[asyncio.Task[None]],
+    ) -> bool:
+        if not tasks:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+            return True
+        except TimeoutError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.store.add_effect(execution_id, "output_drain_incomplete", {})
+            return False
 
     async def _execute(self, record: ExecutionRecord) -> None:
         execution_id = record.id
@@ -130,6 +167,13 @@ class ExecutionRunner:
             "process_starting",
             {"argv": spec.argv, "cwd": str(Path(execution_id))},
         )
+        stdout_buffer = bytearray()
+        stderr_buffer = bytearray()
+        stdout_state = {"truncated": False}
+        stderr_state = {"truncated": False}
+        stream_tasks: list[asyncio.Task[None]] = []
+        timed_out = False
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *spec.argv,
@@ -140,46 +184,68 @@ class ExecutionRunner:
                 start_new_session=os.name == "posix",
             )
             self._processes[execution_id] = process
+            if process.stdout is None or process.stderr is None:
+                raise RuntimeError("subprocess pipes were not created")
+
+            stream_tasks = [
+                asyncio.create_task(
+                    self._drain_stream(
+                        execution_id,
+                        "stdout",
+                        process.stdout,
+                        spec.max_output_bytes,
+                        stdout_buffer,
+                        stdout_state,
+                    )
+                ),
+                asyncio.create_task(
+                    self._drain_stream(
+                        execution_id,
+                        "stderr",
+                        process.stderr,
+                        spec.max_output_bytes,
+                        stderr_buffer,
+                        stderr_state,
+                    )
+                ),
+            ]
+
             if self._stopping.is_set():
                 self._shutdown_ids.add(execution_id)
                 self.store.add_effect(execution_id, "shutdown_interruption_requested", {})
                 self._terminate(process)
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    process.communicate(), timeout=spec.timeout_seconds
-                )
-            except TimeoutError:
-                stdout_b, stderr_b = await self._terminate_and_collect(process)
-                stdout, stdout_truncated = self._limit(stdout_b, spec.max_output_bytes)
-                stderr, stderr_truncated = self._limit(stderr_b, spec.max_output_bytes)
-                self.store.add_effect(
-                    execution_id,
-                    "output_captured",
-                    {"stdout_truncated": stdout_truncated, "stderr_truncated": stderr_truncated},
-                )
-                self.workspaces.snapshot(execution_id, "after")
-                self.store.finish(
-                    execution_id,
-                    ExecutionStatus.TIMED_OUT,
-                    exit_code=process.returncode,
-                    stdout=stdout,
-                    stderr=stderr,
-                )
-                return
 
-            stdout, stdout_truncated = self._limit(stdout_b, spec.max_output_bytes)
-            stderr, stderr_truncated = self._limit(stderr_b, spec.max_output_bytes)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=spec.timeout_seconds)
+            except TimeoutError:
+                timed_out = True
+                await self._terminate_and_wait(process)
+
+            # A job owns its process group. Clean up descendants that outlive the
+            # root process so they cannot leak into later executions.
+            self._terminate(process)
+            streams_complete = await self._finish_streams(execution_id, stream_tasks)
+
+            stdout = stdout_buffer.decode("utf-8", errors="replace")
+            stderr = stderr_buffer.decode("utf-8", errors="replace")
             self.store.add_effect(
                 execution_id,
                 "output_captured",
-                {"stdout_truncated": stdout_truncated, "stderr_truncated": stderr_truncated},
+                {
+                    "stdout_truncated": stdout_state["truncated"],
+                    "stderr_truncated": stderr_state["truncated"],
+                    "drain_complete": streams_complete,
+                },
             )
             self.workspaces.snapshot(execution_id, "after")
+
             latest = self.store.get(execution_id)
             if latest.cancel_requested:
                 status = ExecutionStatus.CANCELLED
             elif execution_id in self._shutdown_ids:
                 status = ExecutionStatus.INTERRUPTED
+            elif timed_out:
+                status = ExecutionStatus.TIMED_OUT
             else:
                 status = (
                     ExecutionStatus.SUCCEEDED if process.returncode == 0 else ExecutionStatus.FAILED
@@ -201,5 +267,10 @@ class ExecutionRunner:
                 stderr=str(exc),
             )
         finally:
+            for task in stream_tasks:
+                if not task.done():
+                    task.cancel()
+            if stream_tasks:
+                await asyncio.gather(*stream_tasks, return_exceptions=True)
             self._processes.pop(execution_id, None)
             self._shutdown_ids.discard(execution_id)
