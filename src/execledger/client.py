@@ -9,6 +9,7 @@ from typing import Any
 
 from execledger.models import (
     TERMINAL_STATUSES,
+    AttemptRecord,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
@@ -107,6 +108,13 @@ class ExecLedgerClient:
             f"/v1/executions/{urllib.parse.quote(execution_id)}/cancel",
         )
         return ExecutionRecord.model_validate(value)
+
+    def attempts(self, execution_id: str) -> list[AttemptRecord]:
+        value = self._request(
+            "GET",
+            f"/v1/executions/{urllib.parse.quote(execution_id)}/attempts",
+        )
+        return [AttemptRecord.model_validate(item) for item in value]
 
     def effects(
         self,

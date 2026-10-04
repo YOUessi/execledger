@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import socket
+import time
+import uuid
 from pathlib import Path
 
 from execledger.models import ExecutionRecord, ExecutionStatus
-from execledger.store import ExecutionStore
+from execledger.store import ClaimedExecution, ExecutionStore, LostLease
 from execledger.workspace import WorkspaceManager
 
 
@@ -18,32 +21,55 @@ class ExecutionRunner:
         *,
         workers: int = 2,
         poll_interval: float = 0.05,
+        lease_seconds: float = 5.0,
+        heartbeat_interval: float | None = None,
+        worker_id: str | None = None,
     ):
         if workers < 1:
             raise ValueError("workers must be positive")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        heartbeat = heartbeat_interval or min(1.0, lease_seconds / 3)
+        if heartbeat <= 0 or heartbeat >= lease_seconds:
+            raise ValueError("heartbeat_interval must be positive and less than lease_seconds")
+
         self.store = store
         self.workspaces = workspaces
         self.workers = workers
         self.poll_interval = poll_interval
+        self.lease_seconds = lease_seconds
+        self.heartbeat_interval = heartbeat
+        self.worker_id = worker_id or (
+            f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        )
         self._tasks: list[asyncio.Task[None]] = []
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._shutdown_ids: set[str] = set()
         self._stopping = asyncio.Event()
+        self._last_expiry_sweep = 0.0
+        self._expiry_sweep_interval = min(1.0, max(0.05, lease_seconds / 2))
 
     async def start(self) -> None:
         if self._tasks:
             return
         self._stopping.clear()
         self._shutdown_ids.clear()
+        self._sweep_expired(force=True)
         self._tasks = [asyncio.create_task(self._worker(i)) for i in range(self.workers)]
 
     async def stop(self) -> None:
         self._stopping.set()
+        stopping: list[asyncio.subprocess.Process] = []
         for execution_id, process in list(self._processes.items()):
             if process.returncode is None:
                 self._shutdown_ids.add(execution_id)
                 self.store.add_effect(execution_id, "shutdown_interruption_requested", {})
-                self._terminate(process)
+                stopping.append(process)
+        if stopping:
+            await asyncio.gather(
+                *(self._terminate_and_wait(process) for process in stopping),
+                return_exceptions=True,
+            )
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
@@ -51,31 +77,61 @@ class ExecutionRunner:
     async def cancel(self, execution_id: str) -> ExecutionRecord:
         record = self.store.request_cancel(execution_id)
         process = self._processes.get(execution_id)
-        if process is not None:
-            self._terminate(process)
+        if process is not None and process.returncode is None:
+            await self._terminate_and_wait(process)
         return record
 
-    async def _worker(self, worker_id: int) -> None:
+    def _sweep_expired(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_expiry_sweep < self._expiry_sweep_interval:
+            return
+        self._last_expiry_sweep = now
+        self.store.expire_leases()
+
+    async def _worker(self, worker_slot: int) -> None:
+        worker_identity = f"{self.worker_id}/{worker_slot}"
         while not self._stopping.is_set():
-            record = self.store.claim_next()
-            if record is None:
+            self._sweep_expired()
+            claim = self.store.claim_next(
+                worker_identity,
+                lease_seconds=self.lease_seconds,
+            )
+            if claim is None:
                 try:
                     await asyncio.wait_for(self._stopping.wait(), timeout=self.poll_interval)
                 except TimeoutError:
                     pass
                 continue
+
+            record = claim.execution
             if self._stopping.is_set():
-                self.store.add_effect(record.id, "shutdown_before_launch", {"worker": worker_id})
-                self.store.finish(
+                self.store.add_effect(
                     record.id,
-                    ExecutionStatus.INTERRUPTED,
-                    exit_code=None,
-                    stdout="",
-                    stderr="",
+                    "shutdown_before_launch",
+                    {"worker_id": worker_identity},
                 )
+                try:
+                    self.store.finish(
+                        record.id,
+                        ExecutionStatus.INTERRUPTED,
+                        exit_code=None,
+                        stdout="",
+                        stderr="",
+                        lease_token=claim.lease_token,
+                    )
+                except LostLease:
+                    pass
                 continue
-            self.store.add_effect(record.id, "worker_assigned", {"worker": worker_id})
-            await self._execute(record)
+
+            self.store.add_effect(
+                record.id,
+                "worker_assigned",
+                {
+                    "worker_id": worker_identity,
+                    "attempt": record.attempt,
+                },
+            )
+            await self._execute(claim)
 
     @staticmethod
     def _terminate(process: asyncio.subprocess.Process) -> None:
@@ -108,6 +164,33 @@ class ExecutionRunner:
         except TimeoutError:
             self._kill(process)
             await process.wait()
+
+    async def _heartbeat(
+        self,
+        execution_id: str,
+        lease_token: str,
+        process: asyncio.subprocess.Process,
+        lease_lost: asyncio.Event,
+    ) -> None:
+        while process.returncode is None and not self._stopping.is_set():
+            await asyncio.sleep(self.heartbeat_interval)
+            if process.returncode is not None:
+                return
+
+            record = self.store.get(execution_id)
+            if record.cancel_requested:
+                await self._terminate_and_wait(process)
+                return
+
+            renewed = self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            )
+            if not renewed:
+                lease_lost.set()
+                await self._terminate_and_wait(process)
+                return
 
     async def _drain_stream(
         self,
@@ -155,26 +238,45 @@ class ExecutionRunner:
             self.store.add_effect(execution_id, "output_drain_incomplete", {})
             return False
 
-    async def _execute(self, record: ExecutionRecord) -> None:
+    async def _execute(self, claim: ClaimedExecution) -> None:
+        record = claim.execution
         execution_id = record.id
+        lease_token = claim.lease_token
         spec = record.spec
         workspace = self.workspaces.directory(execution_id)
-        self.workspaces.snapshot(execution_id, "before")
-        env = os.environ.copy()
-        env.update(spec.env)
-        self.store.add_effect(
-            execution_id,
-            "process_starting",
-            {"argv": spec.argv, "cwd": str(Path(execution_id))},
-        )
+
         stdout_buffer = bytearray()
         stderr_buffer = bytearray()
         stdout_state = {"truncated": False}
         stderr_state = {"truncated": False}
         stream_tasks: list[asyncio.Task[None]] = []
+        heartbeat_task: asyncio.Task[None] | None = None
+        lease_lost = asyncio.Event()
         timed_out = False
+        process: asyncio.subprocess.Process | None = None
 
         try:
+            if not self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            ):
+                return
+            self.workspaces.snapshot(execution_id, "before")
+            if not self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            ):
+                return
+            env = os.environ.copy()
+            env.update(spec.env)
+            self.store.add_effect(
+                execution_id,
+                "process_starting",
+                {"argv": spec.argv, "cwd": str(Path(execution_id))},
+            )
+
             process = await asyncio.create_subprocess_exec(
                 *spec.argv,
                 cwd=workspace,
@@ -209,6 +311,14 @@ class ExecutionRunner:
                     )
                 ),
             ]
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat(
+                    execution_id,
+                    lease_token,
+                    process,
+                    lease_lost,
+                )
+            )
 
             if self._stopping.is_set():
                 self._shutdown_ids.add(execution_id)
@@ -221,10 +331,20 @@ class ExecutionRunner:
                 timed_out = True
                 await self._terminate_and_wait(process)
 
-            # A job owns its process group. Clean up descendants that outlive the
-            # root process so they cannot leak into later executions.
             self._terminate(process)
             streams_complete = await self._finish_streams(execution_id, stream_tasks)
+
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+            # Revalidate ownership immediately before publishing final evidence/state.
+            if lease_lost.is_set() or not self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            ):
+                return
 
             stdout = stdout_buffer.decode("utf-8", errors="replace")
             stderr = stderr_buffer.decode("utf-8", errors="replace")
@@ -256,17 +376,29 @@ class ExecutionRunner:
                 exit_code=process.returncode,
                 stdout=stdout,
                 stderr=stderr,
+                lease_token=lease_token,
             )
+        except LostLease:
+            if process is not None:
+                self._terminate(process)
         except (OSError, RuntimeError) as exc:
-            self.workspaces.snapshot(execution_id, "after")
-            self.store.finish(
-                execution_id,
-                ExecutionStatus.FAILED,
-                exit_code=None,
-                stdout="",
-                stderr=str(exc),
-            )
+            try:
+                self.workspaces.snapshot(execution_id, "after")
+                self.store.finish(
+                    execution_id,
+                    ExecutionStatus.FAILED,
+                    exit_code=None,
+                    stdout="",
+                    stderr=str(exc),
+                    lease_token=lease_token,
+                )
+            except LostLease:
+                if process is not None:
+                    self._terminate(process)
         finally:
+            if heartbeat_task is not None and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
             for task in stream_tasks:
                 if not task.done():
                     task.cancel()

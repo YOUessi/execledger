@@ -10,18 +10,32 @@ from execledger.workspace import WorkspaceManager
 
 
 class ExecutionService:
-    def __init__(self, root: Path, *, workers: int = 2):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        workers: int = 2,
+        lease_seconds: float = 5.0,
+        heartbeat_interval: float | None = None,
+        worker_id: str | None = None,
+    ):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = ExecutionStore(self.root / "execledger.sqlite3")
         self.workspaces = WorkspaceManager(self.root / "workspaces", self.store)
-        self.runner = ExecutionRunner(self.store, self.workspaces, workers=workers)
+        self.runner = ExecutionRunner(
+            self.store,
+            self.workspaces,
+            workers=workers,
+            lease_seconds=lease_seconds,
+            heartbeat_interval=heartbeat_interval,
+            worker_id=worker_id,
+        )
         self._started = False
 
     async def start(self) -> None:
         if self._started:
             return
-        self.store.recover_running()
         await self.runner.start()
         self._started = True
 

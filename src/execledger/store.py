@@ -5,9 +5,12 @@ import json
 import sqlite3
 import threading
 import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from execledger.models import (
+    AttemptRecord,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
@@ -16,6 +19,8 @@ from execledger.models import (
     utc_now,
 )
 
+CURRENT_SCHEMA_VERSION = 2
+
 
 class IdempotencyConflict(ValueError):
     pass
@@ -23,6 +28,17 @@ class IdempotencyConflict(ValueError):
 
 class InvalidTransition(ValueError):
     pass
+
+
+class LostLease(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ClaimedExecution:
+    execution: ExecutionRecord
+    lease_token: str
+    attempt_id: str
 
 
 _ALLOWED_TRANSITIONS: dict[ExecutionStatus, set[ExecutionStatus]] = {
@@ -40,7 +56,12 @@ _ALLOWED_TRANSITIONS: dict[ExecutionStatus, set[ExecutionStatus]] = {
 class ExecutionStore:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
+        self._conn = sqlite3.connect(
+            db_path,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=30,
+        )
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._init_schema()
@@ -49,53 +70,137 @@ class ExecutionStore:
         with self._lock:
             self._conn.close()
 
-    def _init_schema(self) -> None:
-        with self._lock:
-            self._conn.executescript(
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def _column_names(self, table: str) -> set[str]:
+        return {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+
+    def _create_current_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE executions (
+                id TEXT PRIMARY KEY,
+                request_hash TEXT NOT NULL,
+                spec_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                exit_code INTEGER,
+                stdout TEXT NOT NULL DEFAULT '',
+                stderr TEXT NOT NULL DEFAULT '',
+                attempt INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                worker_id TEXT,
+                lease_token TEXT,
+                lease_expires_at TEXT
+            );
+            CREATE TABLE idempotency (
+                key TEXT PRIMARY KEY,
+                request_hash TEXT NOT NULL,
+                execution_id TEXT NOT NULL REFERENCES executions(id)
+            );
+            CREATE TABLE effects (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT NOT NULL REFERENCES executions(id),
+                created_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE INDEX idx_effects_execution
+              ON effects(execution_id, seq);
+            CREATE TABLE snapshots (
+                id TEXT PRIMARY KEY,
+                execution_id TEXT NOT NULL REFERENCES executions(id),
+                phase TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                manifest_json TEXT NOT NULL
+            );
+            CREATE INDEX idx_snapshots_execution
+              ON snapshots(execution_id, created_at);
+            CREATE TABLE attempts (
+                id TEXT PRIMARY KEY,
+                execution_id TEXT NOT NULL REFERENCES executions(id),
+                number INTEGER NOT NULL,
+                worker_id TEXT NOT NULL,
+                lease_token TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                exit_code INTEGER,
+                UNIQUE(execution_id, number)
+            );
+            CREATE INDEX idx_attempts_execution
+              ON attempts(execution_id, number);
+            PRAGMA user_version = 2;
+            """
+        )
+
+    def _migrate_v1_to_v2(self) -> None:
+        columns = self._column_names("executions")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "worker_id" not in columns:
+                self._conn.execute("ALTER TABLE executions ADD COLUMN worker_id TEXT")
+            if "lease_token" not in columns:
+                self._conn.execute("ALTER TABLE executions ADD COLUMN lease_token TEXT")
+            if "lease_expires_at" not in columns:
+                self._conn.execute("ALTER TABLE executions ADD COLUMN lease_expires_at TEXT")
+            self._conn.execute(
                 """
-                PRAGMA journal_mode=WAL;
-                PRAGMA foreign_keys=ON;
-                CREATE TABLE IF NOT EXISTS executions (
+                CREATE TABLE IF NOT EXISTS attempts (
                     id TEXT PRIMARY KEY,
-                    request_hash TEXT NOT NULL,
-                    spec_json TEXT NOT NULL,
+                    execution_id TEXT NOT NULL REFERENCES executions(id),
+                    number INTEGER NOT NULL,
+                    worker_id TEXT NOT NULL,
+                    lease_token TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    started_at TEXT,
+                    started_at TEXT NOT NULL,
                     finished_at TEXT,
                     exit_code INTEGER,
-                    stdout TEXT NOT NULL DEFAULT '',
-                    stderr TEXT NOT NULL DEFAULT '',
-                    attempt INTEGER NOT NULL DEFAULT 0,
-                    cancel_requested INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    key TEXT PRIMARY KEY,
-                    request_hash TEXT NOT NULL,
-                    execution_id TEXT NOT NULL REFERENCES executions(id)
-                );
-                CREATE TABLE IF NOT EXISTS effects (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                    execution_id TEXT NOT NULL REFERENCES executions(id),
-                    created_at TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    payload_json TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_effects_execution
-                  ON effects(execution_id, seq);
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    id TEXT PRIMARY KEY,
-                    execution_id TEXT NOT NULL REFERENCES executions(id),
-                    phase TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    manifest_json TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_snapshots_execution
-                  ON snapshots(execution_id, created_at);
+                    UNIQUE(execution_id, number)
+                )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_attempts_execution
+                ON attempts(execution_id, number)
+                """
+            )
+            self._conn.execute("PRAGMA user_version = 2")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def _init_schema(self) -> None:
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > CURRENT_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema {version} is newer than supported "
+                    f"{CURRENT_SCHEMA_VERSION}"
+                )
+            if not self._table_exists("executions"):
+                self._create_current_schema()
+                return
+            if version < CURRENT_SCHEMA_VERSION:
+                self._migrate_v1_to_v2()
+
+    @property
+    def schema_version(self) -> int:
+        with self._lock:
+            return int(self._conn.execute("PRAGMA user_version").fetchone()[0])
 
     @staticmethod
     def _canonical_spec(spec: ExecutionSpec) -> str:
@@ -166,6 +271,8 @@ class ExecutionStore:
             stderr=row["stderr"],
             attempt=row["attempt"],
             cancel_requested=bool(row["cancel_requested"]),
+            worker_id=row["worker_id"],
+            lease_expires_at=row["lease_expires_at"],
         )
 
     def get(self, execution_id: str) -> ExecutionRecord:
@@ -185,14 +292,29 @@ class ExecutionStore:
             ).fetchall()
         return [self._row_to_execution(row) for row in rows]
 
-    def claim_next(self) -> ExecutionRecord | None:
-        now = utc_now().isoformat()
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: float = 5.0,
+    ) -> ClaimedExecution | None:
+        if not worker_id:
+            raise ValueError("worker_id must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+
+        now_dt = utc_now()
+        now = now_dt.isoformat()
+        expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        lease_token = uuid.uuid4().hex
+        attempt_id = uuid.uuid4().hex
+
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
                     """
-                    SELECT id FROM executions
+                    SELECT id, attempt FROM executions
                     WHERE status = ? AND cancel_requested = 0
                     ORDER BY created_at ASC LIMIT 1
                     """,
@@ -201,28 +323,99 @@ class ExecutionStore:
                 if row is None:
                     self._conn.execute("COMMIT")
                     return None
+
                 execution_id = row["id"]
-                self._conn.execute(
+                attempt_number = int(row["attempt"]) + 1
+                changed = self._conn.execute(
                     """
                     UPDATE executions
                     SET status = ?, started_at = COALESCE(started_at, ?),
-                        updated_at = ?, attempt = attempt + 1
+                        updated_at = ?, attempt = ?, worker_id = ?,
+                        lease_token = ?, lease_expires_at = ?
                     WHERE id = ? AND status = ?
                     """,
                     (
                         ExecutionStatus.RUNNING.value,
                         now,
                         now,
+                        attempt_number,
+                        worker_id,
+                        lease_token,
+                        expires,
                         execution_id,
                         ExecutionStatus.QUEUED.value,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise RuntimeError("atomic claim lost unexpectedly")
+
+                self._conn.execute(
+                    """
+                    INSERT INTO attempts(
+                      id, execution_id, number, worker_id, lease_token,
+                      status, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        execution_id,
+                        attempt_number,
+                        worker_id,
+                        lease_token,
+                        ExecutionStatus.RUNNING.value,
+                        now,
                     ),
                 )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
-        self.add_effect(execution_id, "execution_claimed", {})
-        return self.get(execution_id)
+
+        self.add_effect(
+            execution_id,
+            "execution_claimed",
+            {
+                "worker_id": worker_id,
+                "attempt": attempt_number,
+                "lease_expires_at": expires,
+            },
+        )
+        return ClaimedExecution(
+            execution=self.get(execution_id),
+            lease_token=lease_token,
+            attempt_id=attempt_id,
+        )
+
+    def renew_lease(
+        self,
+        execution_id: str,
+        lease_token: str,
+        *,
+        lease_seconds: float = 5.0,
+    ) -> bool:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        now_dt = utc_now()
+        expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        now = now_dt.isoformat()
+        with self._lock:
+            changed = self._conn.execute(
+                """
+                UPDATE executions
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND lease_token = ?
+                  AND lease_expires_at > ?
+                """,
+                (
+                    expires,
+                    now,
+                    execution_id,
+                    ExecutionStatus.RUNNING.value,
+                    lease_token,
+                    now,
+                ),
+            ).rowcount
+        return changed == 1
 
     def request_cancel(self, execution_id: str) -> ExecutionRecord:
         current = self.get(execution_id)
@@ -266,19 +459,65 @@ class ExecutionStore:
         exit_code: int | None,
         stdout: str,
         stderr: str,
+        lease_token: str | None = None,
     ) -> ExecutionRecord:
-        current = self.get(execution_id)
-        if status not in _ALLOWED_TRANSITIONS.get(current.status, set()):
-            raise InvalidTransition(f"{current.status} -> {status}")
-        now = utc_now().isoformat()
+        now_dt = utc_now()
+        now = now_dt.isoformat()
         with self._lock:
-            self._conn.execute(
-                """
-                UPDATE executions SET status = ?, updated_at = ?, finished_at = ?,
-                  exit_code = ?, stdout = ?, stderr = ? WHERE id = ?
-                """,
-                (status.value, now, now, exit_code, stdout, stderr, execution_id),
-            )
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT status, attempt, lease_token, lease_expires_at
+                    FROM executions WHERE id = ?
+                    """,
+                    (execution_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(execution_id)
+
+                current_status = ExecutionStatus(row["status"])
+                if status not in _ALLOWED_TRANSITIONS.get(current_status, set()):
+                    raise InvalidTransition(f"{current_status} -> {status}")
+
+                current_token = row["lease_token"]
+                expires = row["lease_expires_at"]
+                if current_status == ExecutionStatus.RUNNING and current_token is not None:
+                    if lease_token != current_token:
+                        raise LostLease(execution_id)
+                    if expires is not None and expires <= now:
+                        raise LostLease(execution_id)
+
+                self._conn.execute(
+                    """
+                    UPDATE executions
+                    SET status = ?, updated_at = ?, finished_at = ?,
+                        exit_code = ?, stdout = ?, stderr = ?,
+                        worker_id = NULL, lease_token = NULL, lease_expires_at = NULL
+                    WHERE id = ?
+                    """,
+                    (status.value, now, now, exit_code, stdout, stderr, execution_id),
+                )
+                if int(row["attempt"]) > 0:
+                    self._conn.execute(
+                        """
+                        UPDATE attempts
+                        SET status = ?, finished_at = ?, exit_code = ?
+                        WHERE execution_id = ? AND number = ?
+                        """,
+                        (
+                            status.value,
+                            now,
+                            exit_code,
+                            execution_id,
+                            int(row["attempt"]),
+                        ),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
         self.add_effect(
             execution_id,
             "execution_finished",
@@ -286,30 +525,99 @@ class ExecutionStore:
         )
         return self.get(execution_id)
 
-    def recover_running(self) -> list[str]:
-        now = utc_now().isoformat()
+    def expire_leases(self, now: datetime | None = None) -> list[str]:
+        now_dt = now or utc_now()
+        now_text = now_dt.isoformat()
+        expired: list[tuple[str, str | None, int]] = []
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, worker_id, attempt FROM executions
+                    WHERE status = ?
+                      AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                    """,
+                    (ExecutionStatus.RUNNING.value, now_text),
+                ).fetchall()
+                for row in rows:
+                    execution_id = row["id"]
+                    expired.append(
+                        (execution_id, row["worker_id"], int(row["attempt"]))
+                    )
+                    self._conn.execute(
+                        """
+                        UPDATE executions
+                        SET status = ?, updated_at = ?, finished_at = ?,
+                            worker_id = NULL, lease_token = NULL, lease_expires_at = NULL
+                        WHERE id = ? AND status = ?
+                        """,
+                        (
+                            ExecutionStatus.INTERRUPTED.value,
+                            now_text,
+                            now_text,
+                            execution_id,
+                            ExecutionStatus.RUNNING.value,
+                        ),
+                    )
+                    if int(row["attempt"]) > 0:
+                        self._conn.execute(
+                            """
+                            UPDATE attempts
+                            SET status = ?, finished_at = ?
+                            WHERE execution_id = ? AND number = ? AND status = ?
+                            """,
+                            (
+                                ExecutionStatus.INTERRUPTED.value,
+                                now_text,
+                                execution_id,
+                                int(row["attempt"]),
+                                ExecutionStatus.RUNNING.value,
+                            ),
+                        )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+        for execution_id, worker_id, attempt_number in expired:
+            self.add_effect(
+                execution_id,
+                "lease_expired",
+                {
+                    "worker_id": worker_id,
+                    "attempt": attempt_number,
+                },
+            )
+        return [execution_id for execution_id, _, _ in expired]
+
+    def attempts(self, execution_id: str) -> list[AttemptRecord]:
+        self.get(execution_id)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id FROM executions WHERE status = ?",
-                (ExecutionStatus.RUNNING.value,),
+                """
+                SELECT id, execution_id, number, worker_id, status,
+                       started_at, finished_at, exit_code
+                FROM attempts
+                WHERE execution_id = ?
+                ORDER BY number ASC
+                """,
+                (execution_id,),
             ).fetchall()
-            ids = [row["id"] for row in rows]
-            if ids:
-                self._conn.execute(
-                    """
-                    UPDATE executions SET status = ?, updated_at = ?, finished_at = ?
-                    WHERE status = ?
-                    """,
-                    (
-                        ExecutionStatus.INTERRUPTED.value,
-                        now,
-                        now,
-                        ExecutionStatus.RUNNING.value,
-                    ),
-                )
-        for execution_id in ids:
-            self.add_effect(execution_id, "recovered_as_interrupted", {})
-        return ids
+        return [
+            AttemptRecord(
+                id=row["id"],
+                execution_id=row["execution_id"],
+                number=row["number"],
+                worker_id=row["worker_id"],
+                status=ExecutionStatus(row["status"]),
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                exit_code=row["exit_code"],
+            )
+            for row in rows
+        ]
 
     def add_effect(self, execution_id: str, kind: str, payload: dict[str, object]) -> None:
         now = utc_now().isoformat()

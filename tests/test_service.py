@@ -227,3 +227,88 @@ async def test_missing_executable_fails_without_crashing_worker(tmp_path: Path):
     finally:
         await service.stop()
         service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_services_share_one_sqlite_queue_without_double_claim(tmp_path: Path):
+    service_a = ExecutionService(
+        tmp_path,
+        workers=1,
+        lease_seconds=0.5,
+        heartbeat_interval=0.1,
+        worker_id="service-a",
+    )
+    service_b = ExecutionService(
+        tmp_path,
+        workers=1,
+        lease_seconds=0.5,
+        heartbeat_interval=0.1,
+        worker_id="service-b",
+    )
+    result = await service_a.submit(
+        ExecutionSpec(
+            argv=[
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('owner.txt').write_text('once'); print('done')",
+            ]
+        ),
+        "shared-queue-key",
+    )
+    await asyncio.gather(service_a.start(), service_b.start())
+    try:
+        final = await service_a.wait_terminal(result.execution.id)
+        assert final.status == ExecutionStatus.SUCCEEDED
+        attempts = service_a.store.attempts(final.id)
+        assert len(attempts) == 1
+        assert attempts[0].worker_id in {"service-a/0", "service-b/0"}
+        assert (service_a.workspaces.directory(final.id) / "owner.txt").read_text() == "once"
+    finally:
+        await asyncio.gather(service_a.stop(), service_b.stop())
+        service_a.store.close()
+        service_b.store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_from_non_owner_service_is_observed_by_lease_heartbeat(tmp_path: Path):
+    service_a = ExecutionService(
+        tmp_path,
+        workers=1,
+        lease_seconds=0.5,
+        heartbeat_interval=0.05,
+        worker_id="service-a",
+    )
+    service_b = ExecutionService(
+        tmp_path,
+        workers=1,
+        lease_seconds=0.5,
+        heartbeat_interval=0.05,
+        worker_id="service-b",
+    )
+    result = await service_a.submit(
+        ExecutionSpec(
+            argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout_seconds=60,
+        ),
+        "remote-cancel-key",
+    )
+    await asyncio.gather(service_a.start(), service_b.start())
+    try:
+        execution_id = result.execution.id
+        for _ in range(300):
+            if service_a.store.get(execution_id).status == ExecutionStatus.RUNNING:
+                break
+            await asyncio.sleep(0.01)
+        assert service_a.store.get(execution_id).status == ExecutionStatus.RUNNING
+
+        owner = service_a.store.get(execution_id).worker_id
+        non_owner = service_b if owner and owner.startswith("service-a") else service_a
+        await non_owner.cancel(execution_id)
+
+        final = await service_a.wait_terminal(execution_id, timeout=5)
+        assert final.status == ExecutionStatus.CANCELLED
+        assert final.cancel_requested is True
+    finally:
+        await asyncio.gather(service_a.stop(), service_b.stop())
+        service_a.store.close()
+        service_b.store.close()
