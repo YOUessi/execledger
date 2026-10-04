@@ -15,7 +15,15 @@ async def test_successful_execution_and_snapshots(tmp_path: Path):
     try:
         result = await service.submit(
             ExecutionSpec(
-                argv=[sys.executable, "-c", "from pathlib import Path; print(Path('input.txt').read_text()); Path('out.txt').write_text('done')"],
+                argv=[
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "print(Path('input.txt').read_text()); "
+                        "Path('out.txt').write_text('done')"
+                    ),
+                ],
                 files={"input.txt": "hello"},
             ),
             "success-key",
@@ -37,7 +45,13 @@ async def test_failed_execution_is_recorded(tmp_path: Path):
     await service.start()
     try:
         result = await service.submit(
-            ExecutionSpec(argv=[sys.executable, "-c", "import sys; print('bad', file=sys.stderr); sys.exit(7)"]),
+            ExecutionSpec(
+                argv=[
+                    sys.executable,
+                    "-c",
+                    "import sys; print('bad', file=sys.stderr); sys.exit(7)",
+                ]
+            ),
             "fail-key",
         )
         final = await service.wait_terminal(result.execution.id)
@@ -74,7 +88,10 @@ async def test_running_execution_can_be_cancelled(tmp_path: Path):
     await service.start()
     try:
         result = await service.submit(
-            ExecutionSpec(argv=[sys.executable, "-c", "import time; time.sleep(30)"], timeout_seconds=60),
+            ExecutionSpec(
+                argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout_seconds=60,
+            ),
             "cancel-key",
         )
         execution_id = result.execution.id
