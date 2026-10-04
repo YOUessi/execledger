@@ -88,3 +88,29 @@ def test_sse_rejects_invalid_last_event_id(tmp_path: Path):
         )
         assert response.status_code == 400
         assert response.json()["detail"] == "invalid Last-Event-ID"
+
+
+def test_api_exposes_attempt_history(tmp_path: Path):
+    app = create_app(
+        tmp_path,
+        workers=1,
+        lease_seconds=0.5,
+        heartbeat_interval=0.1,
+        worker_id="api-worker",
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/executions",
+            headers={"Idempotency-Key": "attempt-api-key"},
+            json={"argv": [sys.executable, "-c", "print('ok')"]},
+        )
+        execution_id = created.json()["execution"]["id"]
+        assert _wait_terminal(client, execution_id)["status"] == "SUCCEEDED"
+
+        attempts = client.get(f"/v1/executions/{execution_id}/attempts")
+        assert attempts.status_code == 200
+        payload = attempts.json()
+        assert len(payload) == 1
+        assert payload[0]["number"] == 1
+        assert payload[0]["worker_id"] == "api-worker/0"
+        assert payload[0]["status"] == "SUCCEEDED"
