@@ -66,6 +66,19 @@ class ExecutionRecord(BaseModel):
     stderr: str = ""
     attempt: int = 0
     cancel_requested: bool = False
+    worker_id: str | None = None
+    lease_expires_at: datetime | None = None
+
+
+class AttemptRecord(BaseModel):
+    id: str
+    execution_id: str
+    number: int
+    worker_id: str
+    status: ExecutionStatus
+    started_at: datetime
+    finished_at: datetime | None = None
+    exit_code: int | None = None
 
 
 class EffectRecord(BaseModel):
