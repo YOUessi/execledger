@@ -25,3 +25,21 @@ jobs:
         run: pytest
       - name: Build package
         run: python -m build --outdir dist
+      - name: Verify packaged web console
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+          required = {
+              "execledger/web/index.html",
+              "execledger/web/styles.css",
+              "execledger/web/app.js",
+          }
+          missing = required - names
+          if missing:
+              raise SystemExit(f"missing packaged web assets: {sorted(missing)}")
+          PY
