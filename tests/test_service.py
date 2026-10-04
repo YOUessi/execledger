@@ -31,6 +31,13 @@ async def test_successful_execution_and_snapshots(tmp_path: Path):
         final = await service.wait_terminal(result.execution.id)
         assert final.status == ExecutionStatus.SUCCEEDED
         assert final.stdout.strip() == "hello"
+        effects = service.store.effects(final.id)
+        assert any(
+            effect.kind == "output_chunk"
+            and effect.payload.get("stream") == "stdout"
+            and "hello" in str(effect.payload.get("data"))
+            for effect in effects
+        )
         snapshots = service.store.snapshots(final.id)
         assert [s.phase for s in snapshots] == ["before", "after"]
         assert any(item["path"] == "out.txt" for item in snapshots[-1].manifest)
