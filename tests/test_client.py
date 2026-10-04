@@ -31,6 +31,23 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/executions/missing":
             self._send(404, {"detail": "execution not found"})
             return
+        if self.path == "/v1/executions/ex-1/attempts":
+            self._send(
+                200,
+                [
+                    {
+                        "id": "attempt-1",
+                        "execution_id": "ex-1",
+                        "number": 1,
+                        "worker_id": "worker-a/0",
+                        "status": "SUCCEEDED",
+                        "started_at": "2026-01-01T00:00:00Z",
+                        "finished_at": "2026-01-01T00:00:01Z",
+                        "exit_code": 0,
+                    }
+                ],
+            )
+            return
         if self.path == "/v1/executions/ex-1/events?after=0":
             payload = {
                 "seq": 7,
@@ -114,3 +131,11 @@ def test_client_decodes_sse_effects(api_url: str):
     assert events[0].seq == 7
     assert events[0].kind == "execution_finished"
     assert events[0].payload["status"] == "SUCCEEDED"
+
+
+def test_client_decodes_attempt_history(api_url: str):
+    client = ExecLedgerClient(api_url)
+    attempts = client.attempts("ex-1")
+    assert len(attempts) == 1
+    assert attempts[0].worker_id == "worker-a/0"
+    assert attempts[0].status == ExecutionStatus.SUCCEEDED
