@@ -15,11 +15,14 @@ from execledger.models import (
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
+    RestoreRecord,
     SnapshotRecord,
     SubmitResult,
+    WorkspaceDiff,
 )
 from execledger.service import ExecutionService
 from execledger.store import IdempotencyConflict
+from execledger.workspace import SnapshotNotRestorable, UnsafeWorkspacePath
 
 
 def create_app(
@@ -167,6 +170,31 @@ def create_app(
             return service.store.snapshots(execution_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="execution not found") from exc
+
+    @app.get("/v1/executions/{execution_id}/diff", response_model=WorkspaceDiff)
+    async def get_workspace_diff(
+        execution_id: str,
+        before: str = Query(min_length=1),
+        after: str = Query(min_length=1),
+    ):
+        try:
+            return service.workspaces.diff(execution_id, before, after)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="snapshot not found") from exc
+        except (SnapshotNotRestorable, UnsafeWorkspacePath) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v1/executions/{execution_id}/snapshots/{snapshot_id}/restore",
+        response_model=RestoreRecord,
+    )
+    async def restore_snapshot(execution_id: str, snapshot_id: str):
+        try:
+            return service.workspaces.restore(execution_id, snapshot_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="snapshot not found") from exc
+        except (SnapshotNotRestorable, UnsafeWorkspacePath) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return app
 
