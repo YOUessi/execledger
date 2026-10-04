@@ -23,6 +23,8 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest
+      - name: Check Web console JavaScript
+        run: node --check src/execledger/web/app.js
       - name: Build package
         run: python -m build --outdir dist
       - name: Verify packaged web console
