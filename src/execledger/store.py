@@ -105,7 +105,9 @@ class ExecutionStore:
     def _request_hash(cls, spec: ExecutionSpec) -> str:
         return hashlib.sha256(cls._canonical_spec(spec).encode()).hexdigest()
 
-    def create_execution(self, spec: ExecutionSpec, idempotency_key: str) -> tuple[ExecutionRecord, bool]:
+    def create_execution(
+        self, spec: ExecutionSpec, idempotency_key: str
+    ) -> tuple[ExecutionRecord, bool]:
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("idempotency key must be 1..200 characters")
         request_hash = self._request_hash(spec)
