@@ -1,16 +1,16 @@
 # Architecture
 
-ExecLedger is a local execution control plane for reproducible developer and agent jobs. It is deliberately not a security sandbox; commands run as the service user. Its guarantees focus on execution bookkeeping, process lifecycle and durable evidence rather than hostile-code isolation.
+ExecLedger is a local execution control plane for reproducible developer and agent jobs. Commands run with the service user's OS permissions; the project focuses on durable execution semantics, worker ownership, process lifecycle and evidence rather than hostile-code isolation.
 
 ## Components
 
-- **HTTP API (`api.py`)**: submission, inspection, cancellation, effect-log, snapshot and SSE event endpoints.
-- **Python client (`client.py`)**: small synchronous API client used directly by applications and by the CLI.
-- **Operator CLI (`cli.py`)**: serve, submit, list, get, wait, cancel, logs, effects, snapshots and live follow.
-- **Execution service (`service.py`)**: lifecycle owner and boundary between API callers and the runner.
-- **SQLite store (`store.py`)**: durable execution state, idempotency keys, append-only effect log and snapshot manifests.
-- **Runner (`runner.py`)**: bounded async worker pool and subprocess/process-group lifecycle.
-- **Workspace manager (`workspace.py`)**: per-execution workspaces, path validation, 0600 seeded files and deterministic content-hash snapshots.
+- **HTTP API (`api.py`)**: submission, inspection, cancellation, attempt/effect/snapshot reads, and SSE events.
+- **Python client (`client.py`)**: small synchronous client used directly and by the CLI.
+- **Operator CLI (`cli.py`)**: server and job operations.
+- **Execution service (`service.py`)**: lifecycle boundary around store, workspace manager and runner.
+- **SQLite store (`store.py`)**: durable executions, idempotency, leases, attempts, effects and snapshots.
+- **Runner (`runner.py`)**: async worker slots, lease heartbeats and subprocess/process-group lifecycle.
+- **Workspace manager (`workspace.py`)**: per-execution files, path validation and deterministic snapshots.
 
 ## State machine
 
@@ -23,102 +23,157 @@ QUEUED -> RUNNING -> SUCCEEDED
 QUEUED ----------> CANCELLED
 ```
 
-`RUNNING` rows found during service startup are marked `INTERRUPTED`. ExecLedger does not automatically replay them because replay policy is workload-dependent.
-
-During an orderly service shutdown, already-started jobs are terminated and recorded as `INTERRUPTED`. Jobs that were never started remain `QUEUED`.
+A transition into `RUNNING` is now tied to a durable lease and creates an attempt record.
 
 ## Idempotency
 
-Clients submit an `Idempotency-Key`. The key is atomically bound to a canonical request hash.
+Submission binds an `Idempotency-Key` to a canonical request hash in the same SQLite database as the execution row.
 
-- Same key + same request returns the original logical execution.
-- Same key + different request is rejected with a conflict.
-- Worker retries or API retries must not create a second logical execution.
+- same key + same request -> original logical execution
+- same key + different request -> conflict
+- worker count/process count does not change logical execution identity
 
-The mapping is durable because it is committed in SQLite together with the execution row.
+Idempotency prevents duplicate logical submissions. It does **not** by itself guarantee exactly-once external side effects.
+
+## Durable worker leases
+
+A claim stores:
+
+- worker identity,
+- opaque lease token,
+- lease expiry,
+- incremented attempt number.
+
+The claim and attempt creation happen under a SQLite `BEGIN IMMEDIATE` transaction. Independent connections/processes therefore cannot both transition the same queued row to `RUNNING`.
+
+While executing, the owning runner periodically renews the lease. Renewal succeeds only when:
+
+- the execution is still `RUNNING`,
+- the lease token still matches,
+- the old lease has not already passed its deadline.
+
+A worker that wakes up after its lease deadline cannot revive that lease.
+
+### Fencing
+
+Before publishing a terminal state, the runner revalidates ownership. `finish()` verifies the persisted lease token and current deadline inside the finishing transaction.
+
+A stale worker therefore cannot turn an execution into `SUCCEEDED`, `FAILED`, `TIMED_OUT`, `CANCELLED` or `INTERRUPTED` after ownership has been lost.
+
+Lease expiry is conservative: the current version records the logical execution and attempt as `INTERRUPTED`; it does not automatically replay arbitrary work.
+
+## Attempt history
+
+Every successful claim inserts one immutable attempt identity containing:
+
+- execution id,
+- attempt number,
+- worker identity,
+- start time,
+- terminal time,
+- terminal status,
+- root process exit code.
+
+The opaque lease token is stored internally for fencing but is not exposed by the public attempt model/API.
+
+This separates “one logical execution” from “one concrete worker attempt,” which is required before safe retry policy can be added later.
+
+## Expiry sweeping
+
+Workers periodically run a cheap expiry sweep. A sweep selects `RUNNING` rows whose lease is absent or expired and transitions them to `INTERRUPTED`.
+
+The corresponding running attempt is also closed as `INTERRUPTED`, and a `lease_expired` effect is appended.
+
+Starting a second service does not blindly interrupt all running work. Valid leases owned by another service remain untouched.
+
+## Cross-service cancellation
+
+Cancellation is durable:
+
+1. the API/store sets `cancel_requested`,
+2. the local owner terminates immediately when available,
+3. otherwise the owning worker observes the flag during its next lease heartbeat,
+4. the root process group is terminated,
+5. the valid lease holder publishes `CANCELLED`.
+
+This allows a control request received by one service process to cancel work owned by another process that shares the database.
 
 ## Process lifecycle
 
-Each POSIX job starts with `start_new_session=True`, making the root process the leader of a dedicated process group.
+On POSIX, every root command starts in a new session/process group.
 
-ExecLedger signals the whole group for:
+ExecLedger owns that group. It targets the group for:
 
-- explicit cancellation,
-- timeout,
+- user cancellation,
+- execution timeout,
 - service shutdown,
-- cleanup of descendants left behind after the root exits.
+- lease loss,
+- descendant cleanup after the root exits.
 
-This avoids the common failure mode where a shell, compiler, test worker or subprocess survives after the execution record has already become terminal.
+Termination first sends SIGTERM and escalates to SIGKILL if the root ignores graceful termination.
 
-The root process exit code remains the recorded execution exit code. Descendant cleanup is lifecycle cleanup, not a replacement for the root result.
+The root process exit code remains the recorded exit code. Process-group cleanup prevents background children from silently outliving the logical execution.
 
 ## Effect log and live output
 
-The `effects` table is append-only and uses a monotonically increasing SQLite sequence. Lifecycle events, output chunks, snapshots and terminal records all use this sequence.
+The `effects` table is append-only and uses a monotonically increasing SQLite sequence. Lifecycle events, output chunks, snapshots and terminal records use that sequence.
 
-While a process is running, stdout and stderr are drained concurrently in bounded chunks. Accepted chunks are stored as:
+While a command runs, stdout and stderr are drained concurrently in bounded chunks and stored as `output_chunk` effects. The final execution row also contains bounded stdout/stderr strings for convenient inspection.
 
-```json
-{
-  "kind": "output_chunk",
-  "payload": {
-    "stream": "stdout",
-    "data": "...",
-    "bytes": 123
-  }
-}
-```
-
-The same sequence drives the SSE endpoint:
+SSE uses the same durable sequence:
 
 ```text
 GET /v1/executions/{id}/events?after=<seq>
+Last-Event-ID: <seq>
 ```
 
-The server emits the effect sequence as the SSE `id`. Reconnecting with the last processed sequence therefore resumes from the next committed effect.
-
-The runner still stores bounded final `stdout` and `stderr` strings on the execution record for convenient inspection. Once the configured byte bound is reached, later bytes are drained and discarded so a child cannot cause unbounded memory growth.
+Reconnection resumes strictly after the last committed sequence.
 
 ## Workspace snapshots
 
-Every execution records a deterministic manifest before execution and another after execution. Each regular file contributes:
+Before and after execution, ExecLedger records a sorted manifest of regular files containing:
 
 - relative path,
 - byte size,
 - SHA-256 content digest.
 
-The complete sorted manifest also receives its own SHA-256 digest. Symlinks are excluded from snapshot traversal.
+The complete manifest also receives a SHA-256 digest. Symlinks are excluded from snapshot traversal.
 
-Current snapshots are evidence manifests, not backups: v0.2 does not yet persist file content in a content-addressed store.
+Current snapshots are evidence manifests rather than backups; file bytes are not yet copied into a content-addressed object store.
 
-## Failure and recovery semantics
+## Database migration
 
-- A missing executable becomes `FAILED`.
-- A non-zero root exit becomes `FAILED`.
-- Deadline expiration becomes `TIMED_OUT`.
-- User-requested termination becomes `CANCELLED`.
-- Service/startup interruption becomes `INTERRUPTED`.
-- Output truncation is evidence attached to the execution, not a reason to change the terminal status.
+The database uses SQLite `PRAGMA user_version`.
 
-On restart, stale persisted `RUNNING` rows are conservatively marked `INTERRUPTED`. Automatic retry is intentionally deferred until retry policy and durable worker ownership exist.
+v0.3 schema version 2 adds:
 
-## Concurrency boundary
+- worker ownership fields to `executions`,
+- durable `attempts` table and index.
 
-SQLite transactions serialize durable claim/idempotency mutations, but the current worker pool still lives inside one service process. In-memory task/process maps are used only for local lifecycle actions such as sending cancellation signals; they are not treated as durable ownership.
+An existing v0.1/v0.2 database with schema version 0 is upgraded in place inside a transaction. Existing execution rows, idempotency mappings, effects, snapshots and captured output remain intact.
 
-Cross-process workers therefore remain a future milestone and require persisted leases/fencing rather than a larger in-memory lock.
+A database advertising a future version newer than this binary supports is rejected instead of being silently modified.
 
-## Design boundaries
+## Current guarantee boundary
 
-ExecLedger v0.2 does not provide:
+v0.3 provides:
 
-- hostile-code sandboxing,
-- privilege separation,
+- durable logical job identity,
+- cross-connection/process atomic claim,
+- expiring ownership leases,
+- stale terminal-write fencing,
+- persistent attempts,
+- cross-service cancellation observation,
+- process-tree cleanup,
+- durable incremental output evidence.
+
+It does not yet provide:
+
+- policy-driven automatic retry/backoff,
+- exactly-once arbitrary external effects,
 - multi-host consensus,
-- durable multi-process worker leases,
-- automatic retry/backoff,
 - restorable snapshot bytes,
 - artifact retention/garbage collection,
-- versioned schema migrations.
+- hostile-code sandboxing.
 
-Those are explicit boundaries so the repository does not overstate guarantees it has not implemented.
+These limits are explicit because reliable execution infrastructure is defined as much by what it refuses to promise as by the features it implements.
