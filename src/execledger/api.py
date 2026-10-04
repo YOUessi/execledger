@@ -102,7 +102,10 @@ def create_app(root: Path | None = None, *, workers: int = 2) -> FastAPI:
             if cursor < 0:
                 raise HTTPException(status_code=400, detail="invalid Last-Event-ID")
 
+        start_cursor = cursor
+
         async def event_source():
+            cursor = start_cursor
             while True:
                 batch = service.store.effects_after(execution_id, cursor, limit=500)
                 if batch:
