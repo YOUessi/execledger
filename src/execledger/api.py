@@ -86,14 +86,23 @@ def create_app(root: Path | None = None, *, workers: int = 2) -> FastAPI:
     async def stream_events(
         execution_id: str,
         after: int = Query(default=0, ge=0),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     ):
         try:
             service.store.get(execution_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="execution not found") from exc
 
+        cursor = after
+        if last_event_id is not None:
+            try:
+                cursor = max(cursor, int(last_event_id))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid Last-Event-ID") from exc
+            if cursor < 0:
+                raise HTTPException(status_code=400, detail="invalid Last-Event-ID")
+
         async def event_source():
-            cursor = after
             while True:
                 batch = service.store.effects_after(execution_id, cursor, limit=500)
                 if batch:
