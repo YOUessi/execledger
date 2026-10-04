@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- Added durable worker leases with persisted owner identity, opaque lease token, heartbeat and expiry.
+- Added stale-worker fencing so an expired or replaced lease cannot publish terminal execution state.
+- Added durable per-execution attempt history.
+- Added cross-connection/process atomic claiming through SQLite transactions.
+- Added expiry sweeping that closes lost work as `INTERRUPTED` rather than silently reassigning arbitrary side effects.
+- Added cross-service cancellation observation through the lease heartbeat.
+- Added transactional migration from the existing v0.1/v0.2 SQLite schema.
+- Added worker/lease configuration and attempt-history API/client/CLI surfaces.
+- Hardened termination so cancel, shutdown and lease loss escalate if SIGTERM is ignored.
+- Added competing-service, fencing, migration, expiry and multiprocess claim tests.
+
 ## 0.2.0
 
 - Added a reusable synchronous Python HTTP client.
