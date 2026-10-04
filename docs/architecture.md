@@ -7,6 +7,7 @@ ExecLedger is a local execution control plane for reproducible developer and age
 - **HTTP API (`api.py`)**: submission, inspection, cancellation, attempt/effect/snapshot reads, and SSE events.
 - **Python client (`client.py`)**: small synchronous client used directly and by the CLI.
 - **Operator CLI (`cli.py`)**: server and job operations.
+- **Operator Web console (`web/`)**: bundled same-origin HTML/CSS/JS UI over the public REST/SSE contract.
 - **Execution service (`service.py`)**: lifecycle boundary around store, workspace manager and runner.
 - **SQLite store (`store.py`)**: durable executions, idempotency, leases, attempts, effects and snapshots.
 - **Runner (`runner.py`)**: async worker slots, lease heartbeats and subprocess/process-group lifecycle.
@@ -203,3 +204,21 @@ It does not yet provide:
 - hostile-code sandboxing.
 
 These limits are explicit because reliable execution infrastructure is defined as much by what it refuses to promise as by the features it implements.
+
+
+## Operator Web console
+
+The Web console is packaged as static assets under `execledger/web` and mounted by FastAPI at `/ui`. The root path redirects to `/ui/`.
+
+The UI deliberately consumes the same APIs available to external clients:
+
+- list/get/submit/cancel executions;
+- attempts and effects;
+- SSE live events;
+- snapshots, diff and restore.
+
+It does not read SQLite directly and does not maintain a separate backend state model. A browser refresh therefore reconstructs the operator view from durable server state.
+
+The console has no independent authentication layer. Deployments that expose ExecLedger beyond a trusted/local boundary must add access control in front of the service.
+
+The wheel build includes the static assets as package data. CI builds the distribution and verifies that the HTML, CSS and JavaScript are present in the wheel.
