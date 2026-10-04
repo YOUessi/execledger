@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>ExecLedger Console</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">EXECUTION CONTROL PLANE</div>
+      <h1>ExecLedger</h1>
+    </div>
+    <div class="health">
+      <span id="health-dot" class="dot unknown"></span>
+      <span id="health-text">Connecting…</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card submit-card">
+        <div class="section-title">
+          <h2>Submit job</h2>
+          <button id="load-example" class="ghost small">Example</button>
+        </div>
+        <label>Idempotency key
+          <input id="idempotency-key" placeholder="release-check-001">
+        </label>
+        <label>Execution spec (JSON)
+          <textarea id="spec-json" spellcheck="false"></textarea>
+        </label>
+        <div class="row">
+          <button id="submit-job" class="primary">Submit</button>
+          <span id="submit-status" class="muted"></span>
+        </div>
+      </section>
+
+      <section class="card executions-card">
+        <div class="section-title">
+          <h2>Executions</h2>
+          <button id="refresh-list" class="ghost small">Refresh</button>
+        </div>
+        <div id="execution-list" class="execution-list"></div>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div id="empty-state" class="empty card">
+        <div class="empty-icon">⌁</div>
+        <h2>Select an execution</h2>
+        <p>Inspect lifecycle state, attempts, live output, effects, and workspace snapshots.</p>
+      </div>
+
+      <div id="detail" class="detail hidden">
+        <section class="card detail-head">
+          <div>
+            <div class="eyebrow">EXECUTION</div>
+            <h2 id="execution-id"></h2>
+          </div>
+          <div class="detail-actions">
+            <span id="execution-status" class="badge"></span>
+            <button id="cancel-job" class="danger ghost">Cancel</button>
+          </div>
+        </section>
+
+        <section class="metrics">
+          <div class="metric card"><span>Attempt</span><strong id="metric-attempt">—</strong></div>
+          <div class="metric card"><span>Worker</span><strong id="metric-worker">—</strong></div>
+          <div class="metric card"><span>Exit code</span><strong id="metric-exit">—</strong></div>
+          <div class="metric card"><span>Created</span><strong id="metric-created">—</strong></div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Live output</h2>
+            <div class="row compact">
+              <span id="stream-state" class="muted">idle</span>
+              <button id="reconnect-stream" class="ghost small">Reconnect</button>
+            </div>
+          </div>
+          <div class="term-tabs">
+            <button data-tab="combined" class="tab active">Combined</button>
+            <button data-tab="stdout" class="tab">stdout</button>
+            <button data-tab="stderr" class="tab">stderr</button>
+          </div>
+          <pre id="live-output" class="terminal"></pre>
+        </section>
+
+        <div class="two-col">
+          <section class="card">
+            <div class="section-title"><h2>Attempts</h2></div>
+            <div id="attempts" class="table-wrap"></div>
+          </section>
+          <section class="card">
+            <div class="section-title"><h2>Request</h2></div>
+            <pre id="request-spec" class="code-block"></pre>
+          </section>
+        </div>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Workspace snapshots</h2>
+            <button id="refresh-snapshots" class="ghost small">Refresh</button>
+          </div>
+          <div id="snapshots" class="snapshot-list"></div>
+          <div id="diff-panel" class="diff-panel hidden">
+            <div class="section-title">
+              <h3>Workspace diff</h3>
+              <button id="close-diff" class="ghost small">Close</button>
+            </div>
+            <div id="diff-content"></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Effect timeline</h2>
+            <button id="refresh-effects" class="ghost small">Refresh</button>
+          </div>
+          <div id="effects" class="timeline"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

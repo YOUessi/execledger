@@ -19,7 +19,7 @@ Agent workflows fail in more ways than “the command returned non-zero”:
 
 ExecLedger turns those failure modes into explicit control-plane state: idempotency, leases, attempts, process-tree ownership, durable effect logs, resumable event streams, and workspace snapshots.
 
-## Implemented in v0.4
+## Implemented in v0.5
 
 ### Durable execution state
 
@@ -63,13 +63,16 @@ ExecLedger turns those failure modes into explicit control-plane state: idempote
 
 ### Operator interfaces
 
+- Built-in same-origin Web console served at `/ui/`.
+- Submit jobs, inspect execution status, cancel running work, and watch live output in the browser.
+- Inspect attempt history, effect timeline, request spec, snapshots, workspace diffs and restored copies.
 - Python HTTP client.
 - CLI commands for:
   `submit`, `get`, `list`, `wait`, `cancel`, `logs`, `follow`,
-  `attempts`, `effects`, and `snapshots`.
+  `attempts`, `effects`, `snapshots`, `diff`, and `restore`.
 - Configurable worker count, worker identity, lease TTL and heartbeat interval.
 - Dockerfile.
-- GitHub Actions on Python 3.11 and 3.12.
+- GitHub Actions on Python 3.11 and 3.12, including wheel build and packaged Web asset verification.
 
 ## Quick start
 
@@ -79,6 +82,12 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 pytest
 execledger serve --root .state --port 8080
+```
+
+Then open the operator console at:
+
+```text
+http://127.0.0.1:8080/ui/
 ```
 
 Submit a job:
@@ -155,6 +164,7 @@ src/execledger/
   store.py      SQLite state, migrations, leases, attempts and evidence
   workspace.py  path safety + snapshot/diff/restore logic
   blobstore.py  content-addressed snapshot bytes
+  web/          built-in operator console (HTML/CSS/JS)
 
 tests/          unit, integration and multiprocess regression tests
 docs/           architecture and explicit guarantees/limits
@@ -165,9 +175,11 @@ examples/       runnable execution payload
 
 ExecLedger does not pretend that a directory is a secure sandbox. For hostile or mutually untrusted workloads, place the runner behind a real container/VM/sandbox boundary and keep ExecLedger as the control plane.
 
-v0.3 deliberately does **not** claim automatic retry or exactly-once external side effects. Lease expiry fences stale terminal writes and records the attempt as interrupted, but retry policy remains an explicit future feature because replaying arbitrary commands can duplicate external effects.
+v0.5 deliberately does **not** claim automatic retry or exactly-once external side effects. Lease expiry fences stale terminal writes and records the attempt as interrupted, but retry policy remains an explicit future feature because replaying arbitrary commands can duplicate external effects.
 
-Other planned reliability work includes content-addressed/restorable snapshots, artifact retention/GC, richer schema migration tooling, and policy-driven retry/backoff.
+The Web console is an operator interface, not an authentication boundary. ExecLedger is still intended for trusted/local control-plane deployments unless an external access-control layer is placed in front of it.
+
+Other planned reliability work includes artifact retention/GC, richer schema migration tooling, metrics/health diagnostics, and policy-driven retry/backoff.
 
 
 ## Restorable snapshots
@@ -202,3 +214,23 @@ execledger restore EXECUTION_ID SNAPSHOT_ID
 Restore never overwrites the original execution workspace. The snapshot manifest digest, every relative path, every blob digest and every restored byte count are validated before a restore is considered successful.
 
 Snapshots created by older ExecLedger releases remain readable as evidence manifests. If their underlying bytes were never written to the new blob store, restore fails explicitly rather than fabricating content.
+
+
+## Operator Web console
+
+The Web console is bundled inside the Python package, so no Node.js/npm build step is required at runtime. It uses the same-origin REST and SSE APIs exposed by the service.
+
+The console provides:
+
+- execution list with live status;
+- JSON job submission with explicit idempotency keys;
+- live combined/stdout/stderr views;
+- cancellation for non-terminal work;
+- durable attempt history;
+- request-spec inspection;
+- workspace snapshot list;
+- snapshot-to-snapshot diff;
+- snapshot restore;
+- reverse chronological effect timeline.
+
+The UI is intentionally thin: it does not invent a second persistence model or hide control-plane semantics behind client-only state. Refreshing the page reconstructs the view from the durable HTTP APIs.
