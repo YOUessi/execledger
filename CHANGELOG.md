@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0
+
+- Added a built-in same-origin operator Web console at `/ui/`.
+- Added browser job submission with explicit idempotency keys.
+- Added live execution output over the existing resumable SSE stream.
+- Added browser views for execution status, request specs, attempt history and effect timelines.
+- Added snapshot listing, workspace diff and snapshot restore controls.
+- Added responsive dashboard styling without a runtime Node.js/npm dependency.
+- Bundled Web assets in the Python wheel and added CI verification for packaged assets.
+- Added HTTP tests for the console entry point and static resources.
+
 ## 0.4.0
 
 - Added a local SHA-256 content-addressed blob store for snapshot file bytes.
