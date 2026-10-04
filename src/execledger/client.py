@@ -106,12 +106,63 @@ class ExecLedgerClient:
         )
         return ExecutionRecord.model_validate(value)
 
-    def effects(self, execution_id: str) -> list[EffectRecord]:
+    def effects(
+        self,
+        execution_id: str,
+        *,
+        after: int = 0,
+        limit: int = 1000,
+    ) -> list[EffectRecord]:
+        quoted = urllib.parse.quote(execution_id)
         value = self._request(
             "GET",
-            f"/v1/executions/{urllib.parse.quote(execution_id)}/effects",
+            f"/v1/executions/{quoted}/effects?after={after}&limit={limit}",
         )
         return [EffectRecord.model_validate(item) for item in value]
+
+    def iter_events(
+        self,
+        execution_id: str,
+        *,
+        after: int = 0,
+    ):
+        quoted = urllib.parse.quote(execution_id)
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/executions/{quoted}/events?after={after}",
+            headers={"Accept": "text/event-stream"},
+            method="GET",
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=self.timeout)
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            detail = raw.decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and isinstance(parsed.get("detail"), str):
+                    detail = parsed["detail"]
+            except (ValueError, UnicodeError):
+                pass
+            raise ExecLedgerHTTPError(exc.code, detail) from exc
+        except urllib.error.URLError as exc:
+            raise ConnectionError(
+                f"cannot reach ExecLedger at {self.base_url}: {exc.reason}"
+            ) from exc
+
+        with response:
+            data_lines: list[str] = []
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line.startswith(":"):
+                    continue
+                if not line:
+                    if data_lines:
+                        payload = json.loads("\n".join(data_lines))
+                        yield EffectRecord.model_validate(payload)
+                        data_lines.clear()
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
 
     def snapshots(self, execution_id: str) -> list[SnapshotRecord]:
         value = self._request(
