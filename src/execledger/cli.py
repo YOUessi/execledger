@@ -70,6 +70,18 @@ def build_parser() -> argparse.ArgumentParser:
     effects = sub.add_parser("effects", help="Show the append-only effect log")
     _add_url(effects)
     effects.add_argument("execution_id")
+    effects.add_argument("--after", type=int, default=0)
+    effects.add_argument("--limit", type=int, default=1000)
+
+    follow = sub.add_parser("follow", help="Follow live execution events and output")
+    _add_url(follow)
+    follow.add_argument("execution_id")
+    follow.add_argument("--after", type=int, default=0)
+    follow.add_argument(
+        "--events",
+        action="store_true",
+        help="Print non-output lifecycle events to stderr.",
+    )
 
     snapshots = sub.add_parser("snapshots", help="Show workspace snapshots")
     _add_url(snapshots)
@@ -146,7 +158,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "effects":
-        _json(client.effects(args.execution_id))
+        _json(
+            client.effects(
+                args.execution_id,
+                after=args.after,
+                limit=args.limit,
+            )
+        )
+        return 0
+
+    if args.command == "follow":
+        for effect in client.iter_events(args.execution_id, after=args.after):
+            if effect.kind == "output_chunk":
+                stream = effect.payload.get("stream")
+                data = effect.payload.get("data")
+                if isinstance(data, str):
+                    target = sys.stderr if stream == "stderr" else sys.stdout
+                    print(data, end="", file=target, flush=True)
+            elif args.events:
+                print(
+                    f"[{effect.seq} {effect.kind}] "
+                    f"{json.dumps(effect.payload, sort_keys=True)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         return 0
 
     if args.command == "snapshots":
