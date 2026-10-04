@@ -8,12 +8,12 @@ import urllib.request
 from typing import Any
 
 from execledger.models import (
+    TERMINAL_STATUSES,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
     SnapshotRecord,
     SubmitResult,
-    TERMINAL_STATUSES,
 )
 
 
@@ -68,7 +68,9 @@ class ExecLedgerClient:
                 pass
             raise ExecLedgerHTTPError(exc.code, detail) from exc
         except urllib.error.URLError as exc:
-            raise ConnectionError(f"cannot reach ExecLedger at {self.base_url}: {exc.reason}") from exc
+            raise ConnectionError(
+                f"cannot reach ExecLedger at {self.base_url}: {exc.reason}"
+            ) from exc
 
         if not raw:
             return None
