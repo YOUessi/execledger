@@ -59,11 +59,17 @@ class ExecutionRunner:
 
     async def stop(self) -> None:
         self._stopping.set()
+        stopping: list[asyncio.subprocess.Process] = []
         for execution_id, process in list(self._processes.items()):
             if process.returncode is None:
                 self._shutdown_ids.add(execution_id)
                 self.store.add_effect(execution_id, "shutdown_interruption_requested", {})
-                self._terminate(process)
+                stopping.append(process)
+        if stopping:
+            await asyncio.gather(
+                *(self._terminate_and_wait(process) for process in stopping),
+                return_exceptions=True,
+            )
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
@@ -71,8 +77,8 @@ class ExecutionRunner:
     async def cancel(self, execution_id: str) -> ExecutionRecord:
         record = self.store.request_cancel(execution_id)
         process = self._processes.get(execution_id)
-        if process is not None:
-            self._terminate(process)
+        if process is not None and process.returncode is None:
+            await self._terminate_and_wait(process)
         return record
 
     def _sweep_expired(self, *, force: bool = False) -> None:
@@ -173,7 +179,7 @@ class ExecutionRunner:
 
             record = self.store.get(execution_id)
             if record.cancel_requested:
-                self._terminate(process)
+                await self._terminate_and_wait(process)
                 return
 
             renewed = self.store.renew_lease(
@@ -183,7 +189,7 @@ class ExecutionRunner:
             )
             if not renewed:
                 lease_lost.set()
-                self._terminate(process)
+                await self._terminate_and_wait(process)
                 return
 
     async def _drain_stream(
