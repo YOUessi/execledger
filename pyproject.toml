@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "execledger"
-version = "0.4.0"
+version = "0.5.0"
 description = "Durable local execution control plane with idempotency, snapshots, and effect logs"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -24,6 +24,9 @@ execledger = "execledger.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+execledger = ["web/*.html", "web/*.css", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
