@@ -153,7 +153,7 @@ class ExecutionStore:
                 self._conn.execute("ALTER TABLE executions ADD COLUMN lease_token TEXT")
             if "lease_expires_at" not in columns:
                 self._conn.execute("ALTER TABLE executions ADD COLUMN lease_expires_at TEXT")
-            self._conn.executescript(
+            self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS attempts (
                     id TEXT PRIMARY KEY,
@@ -166,12 +166,16 @@ class ExecutionStore:
                     finished_at TEXT,
                     exit_code INTEGER,
                     UNIQUE(execution_id, number)
-                );
-                CREATE INDEX IF NOT EXISTS idx_attempts_execution
-                  ON attempts(execution_id, number);
-                PRAGMA user_version = 2;
+                )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_attempts_execution
+                ON attempts(execution_id, number)
+                """
+            )
+            self._conn.execute("PRAGMA user_version = 2")
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
@@ -393,19 +397,22 @@ class ExecutionStore:
             raise ValueError("lease_seconds must be positive")
         now_dt = utc_now()
         expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        now = now_dt.isoformat()
         with self._lock:
             changed = self._conn.execute(
                 """
                 UPDATE executions
                 SET lease_expires_at = ?, updated_at = ?
                 WHERE id = ? AND status = ? AND lease_token = ?
+                  AND lease_expires_at > ?
                 """,
                 (
                     expires,
-                    now_dt.isoformat(),
+                    now,
                     execution_id,
                     ExecutionStatus.RUNNING.value,
                     lease_token,
+                    now,
                 ),
             ).rowcount
         return changed == 1
