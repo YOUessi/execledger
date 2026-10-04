@@ -40,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8080)
     serve.add_argument("--root", type=Path, default=Path(".execledger"))
     serve.add_argument("--workers", type=int, default=2)
+    serve.add_argument("--worker-id")
+    serve.add_argument("--lease-seconds", type=float, default=5.0)
+    serve.add_argument("--heartbeat-interval", type=float)
 
     check = sub.add_parser("check-spec", help="Validate an execution spec JSON file")
     check.add_argument("path", type=Path)
@@ -66,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     wait.add_argument("execution_id")
     wait.add_argument("--timeout", type=float, default=60.0)
     wait.add_argument("--interval", type=float, default=0.2)
+
+    attempts = sub.add_parser("attempts", help="Show persisted execution attempts")
+    _add_url(attempts)
+    attempts.add_argument("execution_id")
 
     effects = sub.add_parser("effects", help="Show the append-only effect log")
     _add_url(effects)
@@ -120,7 +127,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         from execledger.api import create_app
 
-        uvicorn.run(create_app(args.root, workers=args.workers), host=args.host, port=args.port)
+        uvicorn.run(
+            create_app(
+                args.root,
+                workers=args.workers,
+                lease_seconds=args.lease_seconds,
+                heartbeat_interval=args.heartbeat_interval,
+                worker_id=args.worker_id,
+            ),
+            host=args.host,
+            port=args.port,
+        )
         return 0
 
     if args.command == "check-spec":
@@ -155,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
                 interval=args.interval,
             )
         )
+        return 0
+
+    if args.command == "attempts":
+        _json(client.attempts(args.execution_id))
         return 0
 
     if args.command == "effects":
