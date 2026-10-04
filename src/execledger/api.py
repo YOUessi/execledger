@@ -100,7 +100,7 @@ def create_app(root: Path | None = None, *, workers: int = 2) -> FastAPI:
                     for effect in batch:
                         cursor = effect.seq
                         payload = json.dumps(
-                            effect.payload,
+                            effect.model_dump(mode="json"),
                             sort_keys=True,
                             separators=(",", ":"),
                         )
