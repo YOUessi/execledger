@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from execledger.models import ExecutionRecord, ExecutionSpec, SubmitResult, TERMINAL_STATUSES
+from execledger.models import TERMINAL_STATUSES, ExecutionRecord, ExecutionSpec, SubmitResult
 from execledger.runner import ExecutionRunner
 from execledger.store import ExecutionStore
 from execledger.workspace import WorkspaceManager
