@@ -250,7 +250,19 @@ class ExecutionRunner:
         process: asyncio.subprocess.Process | None = None
 
         try:
+            if not self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            ):
+                return
             self.workspaces.snapshot(execution_id, "before")
+            if not self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            ):
+                return
             env = os.environ.copy()
             env.update(spec.env)
             self.store.add_effect(
