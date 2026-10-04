@@ -257,7 +257,7 @@ class ExecutionRunner:
                 stdout=stdout,
                 stderr=stderr,
             )
-        except FileNotFoundError as exc:
+        except (OSError, RuntimeError) as exc:
             self.workspaces.snapshot(execution_id, "after")
             self.store.finish(
                 execution_id,
