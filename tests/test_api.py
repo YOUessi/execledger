@@ -158,3 +158,26 @@ def test_api_diff_and_restore_snapshot(tmp_path: Path):
         restore_root = Path(restored.json()["directory"])
         assert (restore_root / "input.txt").read_text() == "original"
         assert not (restore_root / "created.txt").exists()
+
+
+def test_operator_console_is_served_from_same_origin(tmp_path: Path):
+    app = create_app(tmp_path, workers=1)
+    with TestClient(app) as client:
+        root = client.get("/", follow_redirects=False)
+        assert root.status_code in {302, 307}
+        assert root.headers["location"] == "/ui/"
+
+        page = client.get("/ui/")
+        assert page.status_code == 200
+        assert "ExecLedger Console" in page.text
+        assert 'id="execution-list"' in page.text
+        assert 'src="/ui/app.js"' in page.text
+
+        script = client.get("/ui/app.js")
+        assert script.status_code == 200
+        assert "EventSource" in script.text
+        assert "/v1/executions" in script.text
+
+        styles = client.get("/ui/styles.css")
+        assert styles.status_code == 200
+        assert ".execution-item" in styles.text
