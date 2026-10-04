@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 
 from execledger.models import (
+    TERMINAL_STATUSES,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
@@ -30,7 +34,7 @@ def create_app(root: Path | None = None, *, workers: int = 2) -> FastAPI:
             await service.stop()
             service.store.close()
 
-    app = FastAPI(title="ExecLedger", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="ExecLedger", version="0.2.0", lifespan=lifespan)
     app.state.service = service
 
     @app.get("/healthz")
@@ -68,11 +72,56 @@ def create_app(root: Path | None = None, *, workers: int = 2) -> FastAPI:
             raise HTTPException(status_code=404, detail="execution not found") from exc
 
     @app.get("/v1/executions/{execution_id}/effects", response_model=list[EffectRecord])
-    async def get_effects(execution_id: str):
+    async def get_effects(
+        execution_id: str,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=1000, ge=1, le=5000),
+    ):
         try:
-            return service.store.effects(execution_id)
+            return service.store.effects_after(execution_id, after, limit=limit)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="execution not found") from exc
+
+    @app.get("/v1/executions/{execution_id}/events")
+    async def stream_events(
+        execution_id: str,
+        after: int = Query(default=0, ge=0),
+    ):
+        try:
+            service.store.get(execution_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="execution not found") from exc
+
+        async def event_source():
+            cursor = after
+            while True:
+                batch = service.store.effects_after(execution_id, cursor, limit=500)
+                if batch:
+                    for effect in batch:
+                        cursor = effect.seq
+                        payload = json.dumps(
+                            effect.payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        yield (
+                            f"id: {effect.seq}\n"
+                            f"event: {effect.kind}\n"
+                            f"data: {payload}\n\n"
+                        )
+                    continue
+
+                record = service.store.get(execution_id)
+                if record.status in TERMINAL_STATUSES:
+                    return
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(0.25)
+
+        return StreamingResponse(
+            event_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/v1/executions/{execution_id}/snapshots", response_model=list[SnapshotRecord])
     async def get_snapshots(execution_id: str):
