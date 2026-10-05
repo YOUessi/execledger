@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import socket
 import time
 import uuid
@@ -156,27 +155,11 @@ class ExecutionRunner:
             )
             await self._execute(claim)
 
-    @staticmethod
-    def _terminate(process: asyncio.subprocess.Process) -> None:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            return
-        if process.returncode is None:
-            process.terminate()
+    def _terminate(self, process: asyncio.subprocess.Process) -> None:
+        self.backend.terminate(process)
 
-    @staticmethod
-    def _kill(process: asyncio.subprocess.Process) -> None:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            return
-        if process.returncode is None:
-            process.kill()
+    def _kill(self, process: asyncio.subprocess.Process) -> None:
+        self.backend.kill(process)
 
     async def _terminate_and_wait(self, process: asyncio.subprocess.Process) -> None:
         self._terminate(process)
