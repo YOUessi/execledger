@@ -38,19 +38,24 @@ RETRYABLE_STATUSES = {
 
 class RetryPolicy(BaseModel):
     max_attempts: Annotated[int, Field(ge=1, le=10)] = 1
-    retry_on: set[ExecutionStatus] = Field(default_factory=lambda: set(RETRYABLE_STATUSES))
+    retry_on: tuple[ExecutionStatus, ...] = Field(
+        default_factory=lambda: tuple(sorted(RETRYABLE_STATUSES, key=lambda item: item.value))
+    )
     backoff_initial_seconds: Annotated[float, Field(ge=0, le=3600)] = 0.5
     backoff_multiplier: Annotated[float, Field(ge=1, le=10)] = 2.0
     backoff_max_seconds: Annotated[float, Field(ge=0, le=3600)] = 60.0
 
     @field_validator("retry_on")
     @classmethod
-    def validate_retry_on(cls, value: set[ExecutionStatus]) -> set[ExecutionStatus]:
-        unsupported = value - RETRYABLE_STATUSES
+    def validate_retry_on(
+        cls,
+        value: tuple[ExecutionStatus, ...],
+    ) -> tuple[ExecutionStatus, ...]:
+        unsupported = set(value) - RETRYABLE_STATUSES
         if unsupported:
             names = ", ".join(sorted(item.value for item in unsupported))
             raise ValueError(f"retry_on contains unsupported statuses: {names}")
-        return value
+        return tuple(sorted(set(value), key=lambda item: item.value))
 
     def delay_after_attempt(self, attempt_number: int) -> float:
         if attempt_number < 1:
