@@ -246,7 +246,25 @@ class ExecutionStore:
                 ).fetchone()
                 if existing is not None:
                     if existing["request_hash"] != request_hash:
-                        raise IdempotencyConflict("idempotency key reused with a different request")
+                        prior = self._conn.execute(
+                            "SELECT spec_json FROM executions WHERE id = ?",
+                            (existing["execution_id"],),
+                        ).fetchone()
+                        if prior is None:
+                            raise RuntimeError("idempotency mapping references missing execution")
+                        prior_spec = ExecutionSpec.model_validate_json(prior["spec_json"])
+                        if prior_spec.model_dump(mode="json") != spec.model_dump(mode="json"):
+                            raise IdempotencyConflict(
+                                "idempotency key reused with a different request"
+                            )
+                        self._conn.execute(
+                            "UPDATE idempotency SET request_hash = ? WHERE key = ?",
+                            (request_hash, idempotency_key),
+                        )
+                        self._conn.execute(
+                            "UPDATE executions SET request_hash = ? WHERE id = ?",
+                            (request_hash, existing["execution_id"]),
+                        )
                     self._conn.execute("COMMIT")
                     return self.get(existing["execution_id"]), False
                 self._conn.execute(
