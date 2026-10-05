@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from execledger.maintenance import StorageMaintenance
 from execledger.models import TERMINAL_STATUSES, ExecutionRecord, ExecutionSpec, SubmitResult
 from execledger.runner import ExecutionRunner
 from execledger.store import ExecutionStore
@@ -23,6 +24,12 @@ class ExecutionService:
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = ExecutionStore(self.root / "execledger.sqlite3")
         self.workspaces = WorkspaceManager(self.root / "workspaces", self.store)
+        self.maintenance = StorageMaintenance(
+            self.store,
+            self.workspaces.blobs,
+            self.workspaces.restore_root,
+            self.workspaces.maintenance_lock_path,
+        )
         self.runner = ExecutionRunner(
             self.store,
             self.workspaces,
