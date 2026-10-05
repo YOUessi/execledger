@@ -16,11 +16,12 @@ from execledger.models import (
     ExecutionRecord,
     ExecutionSpec,
     ExecutionStatus,
+    ResourceUsage,
     SnapshotRecord,
     utc_now,
 )
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 class IdempotencyConflict(ValueError):
@@ -101,7 +102,8 @@ class ExecutionStore:
                 worker_id TEXT,
                 lease_token TEXT,
                 lease_expires_at TEXT,
-                next_attempt_at TEXT
+                next_attempt_at TEXT,
+                usage_json TEXT
             );
             CREATE TABLE idempotency (
                 key TEXT PRIMARY KEY,
@@ -137,11 +139,12 @@ class ExecutionStore:
                 started_at TEXT NOT NULL,
                 finished_at TEXT,
                 exit_code INTEGER,
+                usage_json TEXT,
                 UNIQUE(execution_id, number)
             );
             CREATE INDEX idx_attempts_execution
               ON attempts(execution_id, number);
-            PRAGMA user_version = 3;
+            PRAGMA user_version = 4;
             """
         )
 
@@ -197,6 +200,25 @@ class ExecutionStore:
             self._conn.execute("ROLLBACK")
             raise
 
+    def _migrate_v3_to_v4(self) -> None:
+        execution_columns = self._column_names("executions")
+        attempt_columns = self._column_names("attempts")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "usage_json" not in execution_columns:
+                self._conn.execute(
+                    "ALTER TABLE executions ADD COLUMN usage_json TEXT"
+                )
+            if "usage_json" not in attempt_columns:
+                self._conn.execute(
+                    "ALTER TABLE attempts ADD COLUMN usage_json TEXT"
+                )
+            self._conn.execute("PRAGMA user_version = 4")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -215,6 +237,9 @@ class ExecutionStore:
                 version = 2
             if version < 3:
                 self._migrate_v2_to_v3()
+                version = 3
+            if version < 4:
+                self._migrate_v3_to_v4()
 
     @property
     def schema_version(self) -> int:
@@ -406,6 +431,11 @@ class ExecutionStore:
             worker_id=row["worker_id"],
             lease_expires_at=row["lease_expires_at"],
             next_attempt_at=row["next_attempt_at"],
+            resource_usage=(
+                ResourceUsage.model_validate_json(row["usage_json"])
+                if row["usage_json"]
+                else None
+            ),
         )
 
     def get(self, execution_id: str) -> ExecutionRecord:
@@ -877,7 +907,7 @@ class ExecutionStore:
             rows = self._conn.execute(
                 """
                 SELECT id, execution_id, number, worker_id, status,
-                       started_at, finished_at, exit_code
+                       started_at, finished_at, exit_code, usage_json
                 FROM attempts
                 WHERE execution_id = ?
                 ORDER BY number ASC
@@ -894,6 +924,11 @@ class ExecutionStore:
                 started_at=row["started_at"],
                 finished_at=row["finished_at"],
                 exit_code=row["exit_code"],
+                resource_usage=(
+                    ResourceUsage.model_validate_json(row["usage_json"])
+                    if row["usage_json"]
+                    else None
+                ),
             )
             for row in rows
         ]
