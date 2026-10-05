@@ -11,6 +11,8 @@ def render_prometheus(report: DiagnosticsReport) -> str:
         (
             'execledger_info{worker_id="'
             + report.worker_id.replace("\\", "\\\\").replace('"', '\\"')
+            + '",backend="'
+            + report.backend.replace("\\", "\\\\").replace('"', '\\"')
             + f'",schema_version="{report.schema_version}"}} 1'
         ),
         "# HELP execledger_workers_configured Configured worker slots.",
@@ -19,6 +21,12 @@ def render_prometheus(report: DiagnosticsReport) -> str:
         "# HELP execledger_active_processes Child processes currently owned by this service.",
         "# TYPE execledger_active_processes gauge",
         f"execledger_active_processes {report.active_processes}",
+        "# HELP execledger_resource_limits_supported Whether this backend enforces limits.",
+        "# TYPE execledger_resource_limits_supported gauge",
+        (
+            "execledger_resource_limits_supported "
+            + ("1" if report.resource_limits_supported else "0")
+        ),
         "# HELP execledger_queue_ready Queued executions immediately claimable.",
         "# TYPE execledger_queue_ready gauge",
         f"execledger_queue_ready {report.queue_ready}",
