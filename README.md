@@ -19,7 +19,7 @@ Agent workflows fail in more ways than “the command returned non-zero”:
 
 ExecLedger turns those failure modes into explicit control-plane state: idempotency, leases, attempts, process-tree ownership, durable effect logs, resumable event streams, and workspace snapshots.
 
-## Implemented in v0.6
+## Implemented in v0.7
 
 ### Durable execution state
 
@@ -77,15 +77,26 @@ Lease expiry follows the same retry policy, so worker loss can be retried withou
 - Snapshots can be restored into a new server-managed directory without mutating execution history.
 - REST endpoint and CLI access to attempt history, effect history, snapshots, diffs and restores.
 
+### Storage lifecycle
+
+- Dry-run-first garbage collection for unreferenced content-addressed blobs.
+- Optional pruning of restored snapshot copies older than a configured age.
+- Snapshot manifests are scanned before deletion; malformed manifests fail GC closed.
+- Referenced blobs are never deleted.
+- Snapshot creation, snapshot restore, and GC share a cross-process maintenance lock so deletion cannot race with snapshot materialization.
+- GC reports reclaimable and reclaimed bytes separately.
+- REST API, Python client, CLI and Web console controls are available.
+
 ### Operator interfaces
 
 - Built-in same-origin Web console served at `/ui/`.
 - Submit jobs, inspect execution status, cancel running work, and watch live output in the browser.
 - Inspect attempt history, effect timeline, request spec, snapshots, workspace diffs and restored copies.
+- Run storage GC scans and confirmed apply operations from the console.
 - Python HTTP client.
 - CLI commands for:
   `submit`, `get`, `list`, `wait`, `cancel`, `logs`, `follow`,
-  `attempts`, `effects`, `snapshots`, `diff`, and `restore`.
+  `attempts`, `effects`, `snapshots`, `diff`, `restore`, and `gc`.
 - Configurable worker count, worker identity, lease TTL and heartbeat interval.
 - Dockerfile.
 - GitHub Actions on Python 3.11 and 3.12, including wheel build and packaged Web asset verification.
@@ -125,6 +136,8 @@ execledger effects EXECUTION_ID
 execledger snapshots EXECUTION_ID
 execledger diff EXECUTION_ID BEFORE_SNAPSHOT_ID AFTER_SNAPSHOT_ID
 execledger restore EXECUTION_ID SNAPSHOT_ID
+execledger gc
+execledger gc --apply
 execledger cancel EXECUTION_ID
 ```
 
@@ -180,6 +193,8 @@ src/execledger/
   store.py      SQLite state, migrations, leases, attempts and evidence
   workspace.py  path safety + snapshot/diff/restore logic
   blobstore.py  content-addressed snapshot bytes
+  maintenance.py storage GC and restore retention
+  locking.py    cross-process snapshot/GC coordination
   web/          built-in operator console (HTML/CSS/JS)
 
 tests/          unit, integration and multiprocess regression tests
@@ -191,11 +206,11 @@ examples/       runnable execution payload
 
 ExecLedger does not pretend that a directory is a secure sandbox. For hostile or mutually untrusted workloads, place the runner behind a real container/VM/sandbox boundary and keep ExecLedger as the control plane.
 
-v0.6 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
+v0.7 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
 
 The Web console is an operator interface, not an authentication boundary. ExecLedger is still intended for trusted/local control-plane deployments unless an external access-control layer is placed in front of it.
 
-Other planned reliability work includes artifact retention/GC, richer schema migration tooling, metrics/health diagnostics, and policy-driven retry/backoff.
+Other planned reliability work includes execution-workspace retention policy, richer schema migration tooling, metrics/health diagnostics, and stronger operational access controls.
 
 
 ## Restorable snapshots
@@ -279,3 +294,31 @@ Important semantics:
 - Attempt outcomes remain durable even if the overall logical execution later succeeds.
 - `next_attempt_at` is persisted, so a process restart does not forget the backoff window.
 - The same workspace is reused across attempts. Callers should only enable retry for commands whose replay behavior they understand.
+
+
+## Storage garbage collection
+
+GC is dry-run by default:
+
+```bash
+execledger gc
+```
+
+Apply deletion only after reviewing the report:
+
+```bash
+execledger gc --apply
+```
+
+Restored snapshot copies are retained unless an age threshold is supplied:
+
+```bash
+execledger gc --restore-older-than-seconds 86400
+execledger gc --apply --restore-older-than-seconds 86400
+```
+
+GC distinguishes **reclaimable** bytes from bytes actually reclaimed. Blob deletion only considers canonical objects that are not referenced by any snapshot manifest.
+
+Snapshot creation, restore, and GC serialize on the same state-root maintenance lock. This prevents a newly written snapshot blob from being observed as unreferenced and deleted before its snapshot metadata is committed.
+
+Malformed snapshot manifests abort GC before deletion. This fail-closed behavior favors retaining extra storage over losing historical evidence.
