@@ -71,6 +71,18 @@ class WorkspaceManager:
         self.store.add_effect(execution_id, "workspace_prepared", {"file_count": len(spec.files)})
         return target
 
+    def usage_bytes(self, execution_id: str) -> int:
+        target = self.directory(execution_id)
+        if not target.exists():
+            return 0
+        total = 0
+        for path in target.rglob("*"):
+            if path.is_symlink():
+                continue
+            if path.is_file():
+                total += path.stat().st_size
+        return total
+
     def snapshot(self, execution_id: str, phase: str) -> SnapshotRecord:
         with exclusive_file_lock(self.maintenance_lock_path):
             target = self.directory(execution_id)
