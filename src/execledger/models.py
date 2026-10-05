@@ -180,6 +180,11 @@ class GarbageCollectionReport(BaseModel):
     restore_dirs_deleted: list[str]
     restore_bytes_reclaimable: int
     restore_bytes_reclaimed: int
+    workspaces_scanned: int
+    workspace_dirs_eligible: list[str]
+    workspace_dirs_deleted: list[str]
+    workspace_bytes_reclaimable: int
+    workspace_bytes_reclaimed: int
 
 
 class DiagnosticsReport(BaseModel):
