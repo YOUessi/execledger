@@ -19,7 +19,7 @@ Agent workflows fail in more ways than “the command returned non-zero”:
 
 ExecLedger turns those failure modes into explicit control-plane state: idempotency, leases, attempts, process-tree ownership, durable effect logs, resumable event streams, and workspace snapshots.
 
-## Implemented in v0.5
+## Implemented in v0.6
 
 ### Durable execution state
 
@@ -35,10 +35,26 @@ ExecLedger turns those failure modes into explicit control-plane state: idempote
 - Atomic work claiming across independent SQLite connections/processes.
 - Persisted worker identity, opaque lease token, heartbeat and expiry.
 - Stale lease holders cannot publish terminal state.
-- Expired leases are converted to `INTERRUPTED`.
+- Expired leases are converted to `INTERRUPTED` attempts.
 - Every claim creates a durable attempt record.
 - Attempt history records worker, attempt number, start/end time, status and exit code.
 - Cancellation requested through another service instance is observed by the owning worker heartbeat.
+
+### Retry and backoff
+
+Retries are explicit and opt-in. The default is still exactly one attempt.
+
+Each execution can configure:
+
+- `max_attempts`;
+- retryable outcomes from `FAILED`, `TIMED_OUT`, and `INTERRUPTED`;
+- initial backoff;
+- exponential multiplier;
+- maximum backoff cap.
+
+A retryable failed attempt is closed in attempt history, while the logical execution returns to `QUEUED` with a durable `next_attempt_at`. Workers only claim that execution after the scheduled time.
+
+Lease expiry follows the same retry policy, so worker loss can be retried without allowing the stale worker to publish a terminal result later.
 
 ### Process lifecycle
 
@@ -175,7 +191,7 @@ examples/       runnable execution payload
 
 ExecLedger does not pretend that a directory is a secure sandbox. For hostile or mutually untrusted workloads, place the runner behind a real container/VM/sandbox boundary and keep ExecLedger as the control plane.
 
-v0.5 deliberately does **not** claim automatic retry or exactly-once external side effects. Lease expiry fences stale terminal writes and records the attempt as interrupted, but retry policy remains an explicit future feature because replaying arbitrary commands can duplicate external effects.
+v0.6 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
 
 The Web console is an operator interface, not an authentication boundary. ExecLedger is still intended for trusted/local control-plane deployments unless an external access-control layer is placed in front of it.
 
@@ -234,3 +250,32 @@ The console provides:
 - reverse chronological effect timeline.
 
 The UI is intentionally thin: it does not invent a second persistence model or hide control-plane semantics behind client-only state. Refreshing the page reconstructs the view from the durable HTTP APIs.
+
+
+## Retry policy
+
+A request can opt into bounded retry behavior:
+
+```json
+{
+  "argv": ["python", "job.py"],
+  "retry_policy": {
+    "max_attempts": 3,
+    "retry_on": ["FAILED", "TIMED_OUT", "INTERRUPTED"],
+    "backoff_initial_seconds": 1,
+    "backoff_multiplier": 2,
+    "backoff_max_seconds": 30
+  }
+}
+```
+
+The first retry waits 1 second, the second waits 2 seconds, then the delay continues exponentially until the cap is reached.
+
+Important semantics:
+
+- `max_attempts: 1` is the default, so existing requests do not start retrying after an upgrade.
+- `CANCELLED` is never automatically retried.
+- A queued execution waiting for backoff can still be cancelled.
+- Attempt outcomes remain durable even if the overall logical execution later succeeds.
+- `next_attempt_at` is persisted, so a process restart does not forget the backoff window.
+- The same workspace is reused across attempts. Callers should only enable retry for commands whose replay behavior they understand.
