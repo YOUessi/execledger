@@ -120,3 +120,109 @@ def test_gc_rejects_negative_restore_age(tmp_path: Path):
             restore_older_than_seconds=-1,
         )
     service.store.close()
+
+
+def test_gc_can_prune_old_snapshotted_terminal_workspaces(tmp_path: Path):
+    service = _service(tmp_path)
+    now = utc_now()
+    record, _ = service.store.create_execution(
+        ExecutionSpec(argv=["echo", "ok"], files={"input.txt": "keep-history"}),
+        "gc-workspace-key",
+    )
+    workspace = service.workspaces.prepare(record.id, record.spec)
+    service.workspaces.snapshot(record.id, "before")
+
+    claim = service.store.claim_next(
+        "maintenance-test/0",
+        lease_seconds=60,
+        now=now - timedelta(hours=3),
+    )
+    assert claim is not None
+    service.store.finish(
+        record.id,
+        status="SUCCEEDED",
+        exit_code=0,
+        stdout="",
+        stderr="",
+        lease_token=claim.lease_token,
+        now=now - timedelta(hours=2),
+    )
+    assert workspace.exists()
+
+    dry = service.maintenance.collect(
+        dry_run=True,
+        workspace_older_than_seconds=3600,
+        now=now,
+    )
+    assert dry.workspace_dirs_eligible == [record.id]
+    assert dry.workspace_dirs_deleted == []
+    assert workspace.exists()
+    assert dry.workspace_bytes_reclaimable >= len("keep-history")
+
+    applied = service.maintenance.collect(
+        dry_run=False,
+        workspace_older_than_seconds=3600,
+        now=now,
+    )
+    assert applied.workspace_dirs_deleted == [record.id]
+    assert not workspace.exists()
+    assert service.store.get(record.id).status.value == "SUCCEEDED"
+    assert service.store.snapshots(record.id)
+    service.store.close()
+
+
+def test_workspace_retention_requires_terminal_state_and_snapshot(tmp_path: Path):
+    service = _service(tmp_path)
+    now = utc_now()
+
+    queued, _ = service.store.create_execution(
+        ExecutionSpec(argv=["echo", "queued"], files={"queued.txt": "q"}),
+        "gc-workspace-queued",
+    )
+    queued_root = service.workspaces.prepare(queued.id, queued.spec)
+
+    terminal, _ = service.store.create_execution(
+        ExecutionSpec(argv=["echo", "terminal"], files={"terminal.txt": "t"}),
+        "gc-workspace-no-snapshot",
+    )
+    terminal_root = service.workspaces.prepare(terminal.id, terminal.spec)
+    claim = service.store.claim_next(
+        "maintenance-test/0",
+        lease_seconds=60,
+        now=now - timedelta(hours=3),
+    )
+    assert claim is not None
+    # The first eligible queued row may be either record; ensure we only finish
+    # the record actually claimed, then leave the other non-terminal.
+    claimed_id = claim.execution.id
+    service.store.finish(
+        claimed_id,
+        status="SUCCEEDED",
+        exit_code=0,
+        stdout="",
+        stderr="",
+        lease_token=claim.lease_token,
+        now=now - timedelta(hours=2),
+    )
+
+    service.maintenance.collect(
+        dry_run=False,
+        workspace_older_than_seconds=0,
+        now=now,
+    )
+
+    # A terminal execution without any durable snapshot is retained, and any
+    # still-queued execution is retained.
+    assert queued_root.exists()
+    assert terminal_root.exists()
+    service.store.close()
+
+
+def test_gc_rejects_negative_workspace_age(tmp_path: Path):
+    service = _service(tmp_path)
+    with pytest.raises(ValueError, match="workspace_older_than_seconds"):
+        service.maintenance.collect(
+            dry_run=True,
+            workspace_older_than_seconds=-1,
+        )
+    service.store.close()
