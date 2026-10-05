@@ -38,6 +38,21 @@
         </div>
       </section>
 
+      <section class="card storage-card">
+        <div class="section-title">
+          <h2>Storage maintenance</h2>
+          <button id="gc-scan" class="ghost small">Scan</button>
+        </div>
+        <label>Prune restored copies older than seconds
+          <input id="gc-restore-age" type="number" min="0" placeholder="leave empty to keep restores">
+        </label>
+        <div class="row">
+          <button id="gc-apply" class="danger ghost small">Apply GC</button>
+          <span id="gc-status" class="muted">dry-run by default</span>
+        </div>
+        <pre id="gc-report" class="code-block compact-block">No scan yet.</pre>
+      </section>
+
       <section class="card executions-card">
         <div class="section-title">
           <h2>Executions</h2>
