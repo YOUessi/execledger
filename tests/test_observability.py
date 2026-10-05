@@ -10,6 +10,8 @@ def test_prometheus_renderer_exposes_operational_gauges():
         workers_configured=2,
         active_processes=1,
         stopping=False,
+        backend="subprocess",
+        resource_limits_supported=True,
         status_counts={
             "QUEUED": 2,
             "RUNNING": 1,
