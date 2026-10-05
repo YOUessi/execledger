@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check-spec", help="Validate an execution spec JSON file")
     check.add_argument("path", type=Path)
 
+    ready = sub.add_parser("ready", help="Check server readiness")
+    _add_url(ready)
+
+    diagnostics = sub.add_parser("diagnostics", help="Show system diagnostics")
+    _add_url(diagnostics)
+
     gc = sub.add_parser("gc", help="Garbage-collect unreferenced storage")
     _add_url(gc)
     gc.add_argument(
@@ -58,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--restore-older-than-seconds",
         type=float,
         help="Also remove restored copies at least this old.",
+    )
+    gc.add_argument(
+        "--workspace-older-than-seconds",
+        type=float,
+        help="Also remove snapshotted terminal workspaces at least this old.",
     )
 
     submit = sub.add_parser("submit", help="Submit an execution spec")
@@ -171,11 +182,20 @@ def main(argv: list[str] | None = None) -> int:
 
     client = ExecLedgerClient(args.url)
 
+    if args.command == "ready":
+        _json(client.readiness())
+        return 0
+
+    if args.command == "diagnostics":
+        _json(client.diagnostics())
+        return 0
+
     if args.command == "gc":
         _json(
             client.gc(
                 apply=args.apply,
                 restore_older_than_seconds=args.restore_older_than_seconds,
+                workspace_older_than_seconds=args.workspace_older_than_seconds,
             )
         )
         return 0
