@@ -36,6 +36,7 @@ class ExecutionService:
             self.store,
             self.workspaces.blobs,
             self.workspaces.restore_root,
+            self.workspaces.root,
             self.workspaces.maintenance_lock_path,
         )
         self.runner = ExecutionRunner(
