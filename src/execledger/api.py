@@ -13,10 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from execledger.models import (
     TERMINAL_STATUSES,
     AttemptRecord,
+    DiagnosticsReport,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
-    DiagnosticsReport,
     GarbageCollectionReport,
     ReadinessReport,
     RestoreRecord,
