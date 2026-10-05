@@ -327,3 +327,62 @@ The snapshot requirement is deliberate. A terminal workspace with no snapshot ma
 Queued executions waiting for their first run or for retry backoff are never candidates. Running work is never a candidate.
 
 Workspace deletion does not remove SQLite execution history, attempts, effects, idempotency mappings, snapshot metadata or referenced blob objects.
+
+
+## Execution backend boundary
+
+The control plane no longer owns subprocess construction directly. `ExecutionRunner` depends on the `ExecutionBackend` protocol:
+
+- `spawn(...)` receives the durable execution identity, attempt number, request, workspace, and environment;
+- `collect_result(...)` returns the target exit code and optional resource-usage evidence.
+
+The built-in `SubprocessBackend` is intentionally small. Durable scheduling, leases, retry, cancellation, snapshots, effects, and persistence remain outside the backend. A future container/VM backend can therefore replace process creation without forking the state machine.
+
+## POSIX launcher and resource limits
+
+Resource limits are applied by a dedicated launcher process rather than by `preexec_fn` inside the long-lived async service.
+
+The sequence is:
+
+```text
+runner
+  -> new-session launcher
+      -> fork
+          -> child applies setrlimit
+          -> child execs target
+      -> launcher wait4(target)
+      -> launcher writes usage result
+  -> runner persists attempt/execution outcome
+```
+
+The launcher applies configured limits for:
+
+- CPU seconds (`RLIMIT_CPU`);
+- virtual address space (`RLIMIT_AS`);
+- file size (`RLIMIT_FSIZE`);
+- open descriptors (`RLIMIT_NOFILE`);
+- process count where supported (`RLIMIT_NPROC`).
+
+Core dumps are disabled for launched targets.
+
+The launcher strips its internal resource-limit environment variable before the target `exec`. An exec failure is reported separately from a target that intentionally exits with status 127, preserving the previous `exit_code=None` launch-failure contract.
+
+## Resource usage evidence
+
+On POSIX the launcher uses `wait4` to capture the target's resource usage. ExecLedger persists:
+
+- wall-clock duration;
+- user CPU time;
+- system CPU time;
+- peak RSS (normalized to bytes on Linux);
+- voluntary and involuntary context-switch counts.
+
+Usage is stored on the concrete attempt row and on the logical execution's latest result. Retry therefore preserves usage for every prior attempt while exposing the most recent attempt on the top-level execution.
+
+Schema version 4 adds nullable `usage_json` columns to executions and attempts. Existing databases migrate in place and old rows remain valid with no usage payload.
+
+## Isolation guarantee boundary
+
+POSIX rlimits reduce accidental resource exhaustion; they are not a hostile-code isolation primitive.
+
+A process can still interact with any filesystem, network, IPC, device, or credential that the service user can access unless a stronger backend restricts it. The backend protocol exists specifically so container/cgroup or VM isolation can be added later without changing durable execution semantics.
