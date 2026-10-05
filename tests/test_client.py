@@ -52,6 +52,11 @@ class _Handler(BaseHTTPRequestHandler):
                     "restore_dirs_deleted": ["restore-1"] if apply else [],
                     "restore_bytes_reclaimable": 7,
                     "restore_bytes_reclaimed": 7 if apply else 0,
+                    "workspaces_scanned": 2,
+                    "workspace_dirs_eligible": ["execution-old"],
+                    "workspace_dirs_deleted": ["execution-old"] if apply else [],
+                    "workspace_bytes_reclaimable": 9,
+                    "workspace_bytes_reclaimed": 9 if apply else 0,
                 },
             )
             return
@@ -60,6 +65,60 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
             self._send(200, {"ok": True, "workers": 1})
+            return
+        if self.path == "/readyz":
+            self._send(
+                200,
+                {
+                    "ready": True,
+                    "checks": {
+                        "database": True,
+                        "state_root": True,
+                        "workspace_root": True,
+                        "blob_root": True,
+                    },
+                    "schema_version": 3,
+                    "worker_id": "worker-a",
+                },
+            )
+            return
+        if self.path == "/v1/diagnostics":
+            self._send(
+                200,
+                {
+                    "generated_at": "2026-01-01T00:00:00Z",
+                    "schema_version": 3,
+                    "worker_id": "worker-a",
+                    "workers_configured": 2,
+                    "active_processes": 1,
+                    "stopping": False,
+                    "status_counts": {
+                        "QUEUED": 1,
+                        "RUNNING": 1,
+                        "SUCCEEDED": 3,
+                        "FAILED": 0,
+                        "TIMED_OUT": 0,
+                        "CANCELLED": 0,
+                        "INTERRUPTED": 0,
+                    },
+                    "queue_ready": 1,
+                    "queue_delayed": 0,
+                    "active_leases": 1,
+                    "expired_leases": 0,
+                    "attempts_total": 4,
+                    "effects_total": 20,
+                    "snapshots_total": 6,
+                    "idempotency_keys": 5,
+                    "blobs_total": 7,
+                    "blob_bytes": 1024,
+                    "workspaces_total": 5,
+                    "workspace_bytes": 2048,
+                    "restores_total": 1,
+                    "restore_bytes": 128,
+                    "database_bytes": 4096,
+                    "wal_bytes": 512,
+                },
+            )
             return
         if self.path == "/v1/executions/missing":
             self._send(404, {"detail": "execution not found"})
@@ -176,7 +235,10 @@ def test_client_decodes_attempt_history(api_url: str):
 
 def test_client_decodes_storage_gc_report(api_url: str):
     client = ExecLedgerClient(api_url)
-    dry = client.gc(restore_older_than_seconds=3600)
+    dry = client.gc(
+        restore_older_than_seconds=3600,
+        workspace_older_than_seconds=7200,
+    )
     assert dry.dry_run is True
     assert dry.bytes_reclaimable == 12
     assert dry.deleted_blobs == []
@@ -184,7 +246,23 @@ def test_client_decodes_storage_gc_report(api_url: str):
     applied = client.gc(
         apply=True,
         restore_older_than_seconds=3600,
+        workspace_older_than_seconds=7200,
     )
     assert applied.dry_run is False
     assert applied.bytes_reclaimed == 12
     assert applied.restore_dirs_deleted == ["restore-1"]
+    assert applied.workspace_dirs_deleted == ["execution-old"]
+
+
+def test_client_decodes_readiness_and_diagnostics(api_url: str):
+    client = ExecLedgerClient(api_url)
+    readiness = client.readiness()
+    assert readiness.ready is True
+    assert readiness.schema_version == 3
+    assert readiness.checks["database"] is True
+
+    diagnostics = client.diagnostics()
+    assert diagnostics.worker_id == "worker-a"
+    assert diagnostics.queue_ready == 1
+    assert diagnostics.active_processes == 1
+    assert diagnostics.blob_bytes == 1024
