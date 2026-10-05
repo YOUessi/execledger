@@ -490,7 +490,14 @@ class ExecutionStore:
                     (now, execution_id),
                 )
         self.add_effect(execution_id, "cancel_requested", {})
-        return self.get(execution_id)
+        result = self.get(execution_id)
+        if current.status == ExecutionStatus.QUEUED:
+            self.add_effect(
+                execution_id,
+                "execution_finished",
+                {"status": ExecutionStatus.CANCELLED.value, "exit_code": None},
+            )
+        return result
 
     @staticmethod
     def _retry_plan(
@@ -584,7 +591,7 @@ class ExecutionStore:
                         """
                         UPDATE executions
                         SET status = ?, updated_at = ?, finished_at = NULL,
-                            exit_code = ?, stdout = ?, stderr = ?,
+                            exit_code = NULL, stdout = ?, stderr = ?,
                             worker_id = NULL, lease_token = NULL,
                             lease_expires_at = NULL, next_attempt_at = ?
                         WHERE id = ?
@@ -592,7 +599,6 @@ class ExecutionStore:
                         (
                             ExecutionStatus.QUEUED.value,
                             now_text,
-                            exit_code,
                             stdout,
                             stderr,
                             next_attempt_at,
