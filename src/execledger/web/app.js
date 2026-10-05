@@ -352,7 +352,7 @@ function connectStream() {
     "execution_submitted", "workspace_prepared", "execution_claimed", "worker_assigned",
     "process_starting", "output_chunk", "output_captured", "snapshot_created",
     "snapshot_restored", "cancel_requested", "execution_finished", "lease_expired",
-    "retry_scheduled",
+    "retry_scheduled", "lease_lost_after_spawn",
     "shutdown_interruption_requested", "shutdown_before_launch", "output_drain_incomplete",
   ];
 
