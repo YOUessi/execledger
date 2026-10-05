@@ -19,7 +19,7 @@ Agent workflows fail in more ways than “the command returned non-zero”:
 
 ExecLedger turns those failure modes into explicit control-plane state: idempotency, leases, attempts, process-tree ownership, durable effect logs, resumable event streams, and workspace snapshots.
 
-## Implemented in v0.8
+## Implemented in v0.9
 
 ### Durable execution state
 
@@ -59,10 +59,21 @@ Lease expiry follows the same retry policy, so worker loss can be retried withou
 ### Process lifecycle
 
 - Bounded async worker pool using argv execution; no shell interpolation.
+- Runner code launches work through an execution-backend protocol rather than calling subprocess APIs directly.
+- The default `subprocess` backend uses a dedicated POSIX launcher process.
 - POSIX jobs run in dedicated process groups.
 - Cancel, timeout, shutdown and lease loss terminate the whole process group.
 - Termination escalates to a forced kill if graceful termination is ignored.
 - Graceful service shutdown records interrupted work as `INTERRUPTED`, never as false success.
+
+### Resource controls and usage
+
+- Optional POSIX resource limits for CPU time, virtual memory, output file size, open file descriptors, and process count.
+- Limits are applied inside a dedicated single-purpose launcher before the target `exec`, not through a server-process `preexec_fn`.
+- Resource limits are opt-in; existing execution requests keep their previous behavior.
+- Unsupported platforms reject configured limits clearly instead of silently ignoring them.
+- Each completed attempt can persist wall time, user/system CPU time, peak RSS, and context-switch counts.
+- Final execution records expose the most recent attempt's resource usage.
 
 ### Evidence and observability
 
@@ -202,6 +213,8 @@ src/execledger/
   cli.py        server and operator CLI
   models.py     request/state/attempt/evidence models
   runner.py     worker leases + process lifecycle + output capture
+  backend.py    pluggable execution backend protocol + subprocess backend
+  launcher.py   POSIX limit application + resource-usage collection
   service.py    service orchestration
   store.py      SQLite state, migrations, leases, attempts and evidence
   workspace.py  path safety + snapshot/diff/restore logic
@@ -220,11 +233,11 @@ examples/       runnable execution payload
 
 ExecLedger does not pretend that a directory is a secure sandbox. For hostile or mutually untrusted workloads, place the runner behind a real container/VM/sandbox boundary and keep ExecLedger as the control plane.
 
-v0.8 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
+v0.9 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
 
 The Web console is an operator interface, not an authentication boundary. ExecLedger is still intended for trusted/local control-plane deployments unless an external access-control layer is placed in front of it.
 
-Other planned reliability work includes richer schema migration tooling, historical execution compaction, authentication/authorization boundaries, and deeper process/resource accounting.
+Other planned reliability work includes a container-backed execution backend, richer schema migration tooling, historical execution compaction, authentication/authorization boundaries, and cgroup-level resource isolation.
 
 
 ## Restorable snapshots
@@ -391,3 +404,45 @@ ExecLedger only treats a workspace as eligible when:
 3. at least one durable snapshot exists for that execution.
 
 Queued, running, retry-backoff, and unsnapshotted terminal workspaces are retained. Deleting a workspace does not delete its execution history, attempts, effects, snapshots, or content-addressed snapshot blobs.
+
+
+## Resource limits and usage accounting
+
+Resource limits are optional per execution:
+
+```json
+{
+  "argv": ["python", "job.py"],
+  "resource_limits": {
+    "max_cpu_seconds": 30,
+    "max_memory_bytes": 536870912,
+    "max_file_bytes": 134217728,
+    "max_open_files": 256,
+    "max_processes": 32
+  }
+}
+```
+
+On POSIX, the default subprocess backend starts a small ExecLedger launcher in the execution's process group. That launcher forks the target, applies `setrlimit` values in the single-threaded child, and then `exec`s the requested command. This avoids running arbitrary pre-exec hooks inside the long-lived async service process.
+
+The launcher records per-attempt resource usage:
+
+- wall-clock duration;
+- user CPU time;
+- system CPU time;
+- peak resident set size;
+- voluntary context switches;
+- involuntary context switches.
+
+Usage is stored on both the concrete attempt and the logical execution's latest result, so it survives API refreshes and service restarts.
+
+These limits are **operational guardrails, not a security sandbox**. In particular, `RLIMIT_AS`, `RLIMIT_NPROC`, and related kernel limits have platform- and container-specific semantics. Untrusted code still requires a stronger isolation backend such as a container or VM.
+
+## Execution backend boundary
+
+The runner now targets an `ExecutionBackend` protocol with two responsibilities:
+
+1. spawn a process for a claimed execution;
+2. collect the backend result and resource evidence.
+
+The built-in backend is `subprocess`. This keeps durable queue/lease/retry logic independent from the concrete isolation mechanism and leaves a clean path for a future container backend without duplicating the control plane.
