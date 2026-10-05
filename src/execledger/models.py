@@ -19,6 +19,7 @@ class ExecutionStatus(StrEnum):
     TIMED_OUT = "TIMED_OUT"
     CANCELLED = "CANCELLED"
     INTERRUPTED = "INTERRUPTED"
+    RESOURCE_EXHAUSTED = "RESOURCE_EXHAUSTED"
 
 
 TERMINAL_STATUSES = {
@@ -27,12 +28,14 @@ TERMINAL_STATUSES = {
     ExecutionStatus.TIMED_OUT,
     ExecutionStatus.CANCELLED,
     ExecutionStatus.INTERRUPTED,
+    ExecutionStatus.RESOURCE_EXHAUSTED,
 }
 
 RETRYABLE_STATUSES = {
     ExecutionStatus.FAILED,
     ExecutionStatus.TIMED_OUT,
     ExecutionStatus.INTERRUPTED,
+    ExecutionStatus.RESOURCE_EXHAUSTED,
 }
 
 
@@ -66,6 +69,50 @@ class RetryPolicy(BaseModel):
         return min(delay, self.backoff_max_seconds)
 
 
+class ResourceLimits(BaseModel):
+    """Per-execution resource controls.
+
+    POSIX kernel limits are applied by the local backend before exec. Workspace
+    bytes are enforced by the ExecLedger runner on every supported platform.
+    """
+
+    cpu_seconds: int | None = Field(default=None, ge=1, le=86_400)
+    memory_bytes: int | None = Field(
+        default=None,
+        ge=64 * 1024 * 1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    file_size_bytes: int | None = Field(
+        default=None,
+        ge=1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    open_files: int | None = Field(default=None, ge=16, le=1_048_576)
+    workspace_bytes: int | None = Field(
+        default=None,
+        ge=1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+
+    def has_kernel_limits(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.cpu_seconds,
+                self.memory_bytes,
+                self.file_size_bytes,
+                self.open_files,
+            )
+        )
+
+    def configured(self) -> dict[str, int]:
+        return {
+            key: int(value)
+            for key, value in self.model_dump(mode="python").items()
+            if value is not None
+        }
+
+
 class ExecutionSpec(BaseModel):
     argv: Annotated[list[str], Field(min_length=1, max_length=64)]
     env: dict[str, str] = Field(default_factory=dict)
@@ -73,6 +120,7 @@ class ExecutionSpec(BaseModel):
     timeout_seconds: Annotated[float, Field(gt=0, le=3600)] = 60.0
     max_output_bytes: Annotated[int, Field(ge=1024, le=4 * 1024 * 1024)] = 256 * 1024
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    resource_limits: ResourceLimits = Field(default_factory=ResourceLimits)
 
     @field_validator("argv")
     @classmethod
@@ -191,6 +239,8 @@ class DiagnosticsReport(BaseModel):
     generated_at: datetime
     schema_version: int
     worker_id: str
+    backend: str
+    kernel_resource_limits_supported: bool
     workers_configured: int
     active_processes: int
     stopping: bool
