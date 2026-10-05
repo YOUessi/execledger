@@ -231,12 +231,13 @@ def test_v01_database_migrates_in_place(tmp_path: Path):
     conn.close()
 
     store = ExecutionStore(db)
-    assert store.schema_version == 3
+    assert store.schema_version == 4
     migrated = store.get("legacy-execution")
     assert migrated.status == ExecutionStatus.QUEUED
     assert migrated.worker_id is None
     assert migrated.lease_expires_at is None
     assert migrated.next_attempt_at is None
+    assert migrated.resource_usage is None
     assert store.attempts("legacy-execution") == []
 
     replayed, created = store.create_execution(spec, "legacy-key")
