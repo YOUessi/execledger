@@ -222,3 +222,36 @@ It does not read SQLite directly and does not maintain a separate backend state 
 The console has no independent authentication layer. Deployments that expose ExecLedger beyond a trusted/local boundary must add access control in front of the service.
 
 The wheel build includes the static assets as package data. CI builds the distribution and verifies that the HTML, CSS and JavaScript are present in the wheel.
+
+
+## Retry state and backoff
+
+Retry is represented as state on the logical execution rather than as an in-memory timer.
+
+A completed attempt with a retryable outcome is persisted first. If the configured attempt budget remains, the execution row returns to `QUEUED` and receives a durable `next_attempt_at` timestamp. Work claiming filters queued rows by that timestamp.
+
+This gives retry three useful properties:
+
+1. restarting the service does not lose the delay;
+2. multiple workers still compete through the same SQLite claim transaction;
+3. attempt history stays immutable even when the logical execution continues.
+
+Backoff is exponential:
+
+```text
+delay(n) = min(initial * multiplier^(n-1), max_backoff)
+```
+
+where `n` is the attempt that just failed.
+
+Retryable outcomes are deliberately limited to `FAILED`, `TIMED_OUT`, and `INTERRUPTED`. `CANCELLED` and `SUCCEEDED` are never retry targets.
+
+The default `max_attempts` is 1. This is a compatibility and safety boundary: upgrading ExecLedger never silently changes a once-only command into a replayed command.
+
+## Retry and idempotency
+
+Adding retry settings changed the serialized execution request schema. Existing databases may contain idempotency hashes computed before the retry policy field existed.
+
+When an old idempotency hash differs, ExecLedger falls back to semantic request comparison after applying current defaults. If the requests are equivalent, the existing logical execution is reused and the stored hash is upgraded. A genuinely different request still conflicts.
+
+This preserves the original idempotency contract across schema evolution.
