@@ -255,3 +255,34 @@ Adding retry settings changed the serialized execution request schema. Existing 
 When an old idempotency hash differs, ExecLedger falls back to semantic request comparison after applying current defaults. If the requests are equivalent, the existing logical execution is reused and the stored hash is upgraded. A genuinely different request still conflicts.
 
 This preserves the original idempotency contract across schema evolution.
+
+
+## Storage maintenance and garbage collection
+
+Snapshot blobs are content-addressed objects, so object lifetime is determined by references from durable snapshot manifests rather than by execution age.
+
+GC performs a mark-and-sweep style pass:
+
+1. read every snapshot manifest and collect referenced SHA-256 digests;
+2. inventory canonical objects under the blob store;
+3. classify objects absent from the reference set as orphaned;
+4. report reclaimable bytes in dry-run mode;
+5. delete only those orphaned objects when apply mode is explicitly requested.
+
+Malformed snapshot JSON, malformed manifest items, or malformed digests abort collection before deletion. The system deliberately leaks storage rather than risking evidence loss when metadata is ambiguous.
+
+### Cross-process maintenance lock
+
+Blob creation happens before the snapshot row is committed to SQLite. Without coordination, GC could otherwise observe that newly written object during this short interval and classify it as unreferenced.
+
+Snapshot creation, snapshot restore, and GC therefore acquire the same state-root file lock. The lock is advisory but cross-process, and it covers both object-store operations and the corresponding snapshot metadata update.
+
+This keeps the blob store and snapshot reference graph consistent even when multiple ExecLedger service processes share one state root.
+
+### Restored-copy retention
+
+Restored workspaces are derived copies rather than durable evidence roots. GC can optionally prune restore directories older than a caller-specified age.
+
+Restore cleanup is disabled unless an age threshold is explicitly provided. Dry-run mode reports eligible directory names and byte counts without mutating them.
+
+Execution workspaces themselves are not deleted by v0.7 GC. Their lifecycle remains independent because they may still be useful for debugging or future retry policy.

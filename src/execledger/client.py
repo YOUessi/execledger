@@ -13,6 +13,7 @@ from execledger.models import (
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
+    GarbageCollectionReport,
     RestoreRecord,
     SnapshotRecord,
     SubmitResult,
@@ -207,6 +208,19 @@ class ExecLedgerClient:
             f"/v1/executions/{execution}/snapshots/{snapshot}/restore",
         )
         return RestoreRecord.model_validate(value)
+
+    def gc(
+        self,
+        *,
+        apply: bool = False,
+        restore_older_than_seconds: float | None = None,
+    ) -> GarbageCollectionReport:
+        params = {"apply": "true" if apply else "false"}
+        if restore_older_than_seconds is not None:
+            params["restore_older_than_seconds"] = str(restore_older_than_seconds)
+        query = urllib.parse.urlencode(params)
+        value = self._request("POST", f"/v1/maintenance/gc?{query}")
+        return GarbageCollectionReport.model_validate(value)
 
     def wait(
         self,

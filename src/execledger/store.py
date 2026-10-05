@@ -880,6 +880,43 @@ class ExecutionStore:
             manifest=manifest,
         )
 
+    def snapshot_blob_references(self) -> tuple[set[str], int]:
+        references: set[str] = set()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, manifest_json FROM snapshots ORDER BY created_at ASC"
+            ).fetchall()
+
+        for row in rows:
+            try:
+                manifest = json.loads(row["manifest_json"])
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"snapshot {row['id']} has invalid manifest JSON"
+                ) from exc
+            if not isinstance(manifest, list):
+                raise RuntimeError(
+                    f"snapshot {row['id']} has invalid manifest structure"
+                )
+            for item in manifest:
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        f"snapshot {row['id']} has invalid manifest item"
+                    )
+                digest = item.get("sha256")
+                if not isinstance(digest, str):
+                    raise RuntimeError(
+                        f"snapshot {row['id']} is missing a blob digest"
+                    )
+                if len(digest) != 64 or any(
+                    char not in "0123456789abcdef" for char in digest
+                ):
+                    raise RuntimeError(
+                        f"snapshot {row['id']} has an invalid blob digest"
+                    )
+                references.add(digest)
+        return references, len(rows)
+
     def get_snapshot(self, execution_id: str, snapshot_id: str) -> SnapshotRecord:
         self.get(execution_id)
         with self._lock:

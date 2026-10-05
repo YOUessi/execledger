@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -23,6 +24,38 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/v1/maintenance/gc":
+            query = urllib.parse.parse_qs(parsed.query)
+            apply = query.get("apply", ["false"])[0] == "true"
+            self._send(
+                200,
+                {
+                    "dry_run": not apply,
+                    "snapshots_scanned": 2,
+                    "blobs_scanned": 3,
+                    "referenced_blobs": 2,
+                    "orphan_blobs": [
+                        {"digest": "a" * 64, "size": 12}
+                    ],
+                    "deleted_blobs": (
+                        [{"digest": "a" * 64, "size": 12}]
+                        if apply
+                        else []
+                    ),
+                    "bytes_reclaimable": 12,
+                    "bytes_reclaimed": 12 if apply else 0,
+                    "restores_scanned": 1,
+                    "restore_dirs_eligible": ["restore-1"],
+                    "restore_dirs_deleted": ["restore-1"] if apply else [],
+                    "restore_bytes_reclaimable": 7,
+                    "restore_bytes_reclaimed": 7 if apply else 0,
+                },
+            )
+            return
+        self._send(404, {"detail": "not found"})
 
     def do_GET(self) -> None:
         if self.path == "/healthz":
@@ -139,3 +172,19 @@ def test_client_decodes_attempt_history(api_url: str):
     assert len(attempts) == 1
     assert attempts[0].worker_id == "worker-a/0"
     assert attempts[0].status == ExecutionStatus.SUCCEEDED
+
+
+def test_client_decodes_storage_gc_report(api_url: str):
+    client = ExecLedgerClient(api_url)
+    dry = client.gc(restore_older_than_seconds=3600)
+    assert dry.dry_run is True
+    assert dry.bytes_reclaimable == 12
+    assert dry.deleted_blobs == []
+
+    applied = client.gc(
+        apply=True,
+        restore_older_than_seconds=3600,
+    )
+    assert applied.dry_run is False
+    assert applied.bytes_reclaimed == 12
+    assert applied.restore_dirs_deleted == ["restore-1"]

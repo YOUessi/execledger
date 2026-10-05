@@ -16,6 +16,7 @@ from execledger.models import (
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
+    GarbageCollectionReport,
     RestoreRecord,
     SnapshotRecord,
     SubmitResult,
@@ -52,7 +53,7 @@ def create_app(
             await service.stop()
             service.store.close()
 
-    app = FastAPI(title="ExecLedger", version="0.6.0", lifespan=lifespan)
+    app = FastAPI(title="ExecLedger", version="0.7.0", lifespan=lifespan)
     app.state.service = service
 
     @app.get("/", include_in_schema=False)
@@ -174,6 +175,21 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @app.post("/v1/maintenance/gc", response_model=GarbageCollectionReport)
+    async def run_storage_gc(
+        apply: bool = Query(default=False),
+        restore_older_than_seconds: float | None = Query(default=None, ge=0),
+    ):
+        try:
+            return service.maintenance.collect(
+                dry_run=not apply,
+                restore_older_than_seconds=restore_older_than_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/v1/executions/{execution_id}/snapshots", response_model=list[SnapshotRecord])
     async def get_snapshots(execution_id: str):

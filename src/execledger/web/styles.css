@@ -37,7 +37,8 @@ h3 { font-size:14px; }
 .sidebar { border-right:1px solid var(--border); padding:18px; display:flex; flex-direction:column; gap:16px; }
 .content { padding:18px; min-width:0; }
 .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; }
-.submit-card,.executions-card { padding:16px; }
+.submit-card,.executions-card,.storage-card { padding:16px; }
+.executions-card { min-height:180px; flex:1; display:flex; flex-direction:column; }
 .section-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
 label { display:block; color:var(--muted); font-size:12px; margin:12px 0; }
 input,textarea {
@@ -58,7 +59,7 @@ textarea { min-height:165px; resize:vertical; font-family:var(--mono); font-size
 .danger { color:var(--danger); }
 .small { font-size:11px; padding:6px 9px; }
 .muted { color:var(--muted); font-size:12px; }
-.execution-list { max-height:calc(100vh - 390px); overflow:auto; display:flex; flex-direction:column; gap:7px; }
+.execution-list { min-height:0; overflow:auto; display:flex; flex:1; flex-direction:column; gap:7px; }
 .execution-item {
   padding:10px; background:#0e1217; border:1px solid transparent; border-radius:8px;
   text-align:left; color:var(--text); width:100%;
@@ -96,6 +97,7 @@ textarea { min-height:165px; resize:vertical; font-family:var(--mono); font-size
   font:11px/1.55 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere;
 }
 .code-block { min-height:120px; }
+.compact-block { min-height:72px; max-height:140px; margin-top:10px; }
 .two-col { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
 .two-col>.card { padding:16px; min-width:0; }
 .table { width:100%; border-collapse:collapse; font-size:11px; }

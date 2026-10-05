@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0
+
+- Added dry-run-first garbage collection for unreferenced content-addressed snapshot blobs.
+- Added optional age-based pruning for restored snapshot copies.
+- Added reclaimable/reclaimed byte accounting in structured GC reports.
+- Added a shared cross-process maintenance lock covering snapshot creation, restore and GC.
+- Made GC fail closed on malformed snapshot manifests or blob digests.
+- Added blob inventory and canonical deletion primitives.
+- Added REST, Python client, CLI and Web console storage-maintenance controls.
+- Added maintenance, API, client and CLI tests for dry-run/apply behavior and retention.
+- Kept execution workspaces outside automatic deletion to preserve debugging state.
+
 ## 0.6.0
 
 - Added opt-in automatic retry policy with bounded attempt counts.
