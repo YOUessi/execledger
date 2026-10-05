@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from execledger.models import ExecutionSpec, utc_now
+from execledger.models import ExecutionSpec, ExecutionStatus, utc_now
 from execledger.service import ExecutionService
 
 
@@ -135,12 +135,12 @@ def test_gc_can_prune_old_snapshotted_terminal_workspaces(tmp_path: Path):
     claim = service.store.claim_next(
         "maintenance-test/0",
         lease_seconds=60,
-        now=now - timedelta(hours=3),
+        now=now - timedelta(hours=2, seconds=1),
     )
     assert claim is not None
     service.store.finish(
         record.id,
-        status="SUCCEEDED",
+        status=ExecutionStatus.SUCCEEDED,
         exit_code=0,
         stdout="",
         stderr="",
@@ -175,12 +175,6 @@ def test_workspace_retention_requires_terminal_state_and_snapshot(tmp_path: Path
     service = _service(tmp_path)
     now = utc_now()
 
-    queued, _ = service.store.create_execution(
-        ExecutionSpec(argv=["echo", "queued"], files={"queued.txt": "q"}),
-        "gc-workspace-queued",
-    )
-    queued_root = service.workspaces.prepare(queued.id, queued.spec)
-
     terminal, _ = service.store.create_execution(
         ExecutionSpec(argv=["echo", "terminal"], files={"terminal.txt": "t"}),
         "gc-workspace-no-snapshot",
@@ -189,15 +183,13 @@ def test_workspace_retention_requires_terminal_state_and_snapshot(tmp_path: Path
     claim = service.store.claim_next(
         "maintenance-test/0",
         lease_seconds=60,
-        now=now - timedelta(hours=3),
+        now=now - timedelta(hours=2, seconds=1),
     )
     assert claim is not None
-    # The first eligible queued row may be either record; ensure we only finish
-    # the record actually claimed, then leave the other non-terminal.
-    claimed_id = claim.execution.id
+    assert claim.execution.id == terminal.id
     service.store.finish(
-        claimed_id,
-        status="SUCCEEDED",
+        terminal.id,
+        status=ExecutionStatus.SUCCEEDED,
         exit_code=0,
         stdout="",
         stderr="",
@@ -205,18 +197,23 @@ def test_workspace_retention_requires_terminal_state_and_snapshot(tmp_path: Path
         now=now - timedelta(hours=2),
     )
 
+    queued, _ = service.store.create_execution(
+        ExecutionSpec(argv=["echo", "queued"], files={"queued.txt": "q"}),
+        "gc-workspace-queued",
+    )
+    queued_root = service.workspaces.prepare(queued.id, queued.spec)
+
     service.maintenance.collect(
         dry_run=False,
         workspace_older_than_seconds=0,
         now=now,
     )
 
-    # A terminal execution without any durable snapshot is retained, and any
-    # still-queued execution is retained.
-    assert queued_root.exists()
+    # A terminal execution without a durable snapshot is retained, and a
+    # still-queued execution is also retained.
     assert terminal_root.exists()
+    assert queued_root.exists()
     service.store.close()
-
 
 def test_gc_rejects_negative_workspace_age(tmp_path: Path):
     service = _service(tmp_path)
