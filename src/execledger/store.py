@@ -455,7 +455,8 @@ class ExecutionStore:
                 self._conn.execute(
                     """
                     UPDATE executions SET cancel_requested = 1, status = ?, updated_at = ?,
-                      finished_at = ? WHERE id = ? AND status = ?
+                      finished_at = ?, next_attempt_at = NULL
+                    WHERE id = ? AND status = ?
                     """,
                     (
                         ExecutionStatus.CANCELLED.value,
