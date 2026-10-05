@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
+from execledger.backends import LocalProcessBackend, ProcessBackend
 from execledger.models import ExecutionRecord, ExecutionStatus
 from execledger.store import ClaimedExecution, ExecutionStore, LostLease
 from execledger.workspace import WorkspaceManager
@@ -24,11 +25,15 @@ class ExecutionRunner:
         lease_seconds: float = 5.0,
         heartbeat_interval: float | None = None,
         worker_id: str | None = None,
+        backend: ProcessBackend | None = None,
+        resource_poll_interval: float = 0.1,
     ):
         if workers < 1:
             raise ValueError("workers must be positive")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if resource_poll_interval <= 0:
+            raise ValueError("resource_poll_interval must be positive")
         heartbeat = heartbeat_interval or min(1.0, lease_seconds / 3)
         if heartbeat <= 0 or heartbeat >= lease_seconds:
             raise ValueError("heartbeat_interval must be positive and less than lease_seconds")
@@ -42,6 +47,8 @@ class ExecutionRunner:
         self.worker_id = worker_id or (
             f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         )
+        self.backend = backend or LocalProcessBackend()
+        self.resource_poll_interval = resource_poll_interval
         self._tasks: list[asyncio.Task[None]] = []
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._shutdown_ids: set[str] = set()
@@ -84,6 +91,10 @@ class ExecutionRunner:
             "stopping": self._stopping.is_set(),
             "lease_seconds": self.lease_seconds,
             "heartbeat_interval": self.heartbeat_interval,
+            "backend": self.backend.name,
+            "kernel_resource_limits_supported": (
+                self.backend.kernel_resource_limits_supported
+            ),
         }
 
     async def cancel(self, execution_id: str) -> ExecutionRecord:
@@ -204,6 +215,30 @@ class ExecutionRunner:
                 await self._terminate_and_wait(process)
                 return
 
+    async def _monitor_workspace_limit(
+        self,
+        execution_id: str,
+        process: asyncio.subprocess.Process,
+        limit: int,
+        exceeded: asyncio.Event,
+    ) -> None:
+        while process.returncode is None and not self._stopping.is_set():
+            usage = self.workspaces.usage_bytes(execution_id)
+            if usage > limit:
+                exceeded.set()
+                self.store.add_effect(
+                    execution_id,
+                    "resource_limit_exceeded",
+                    {
+                        "resource": "workspace_bytes",
+                        "limit": limit,
+                        "observed": usage,
+                    },
+                )
+                await self._terminate_and_wait(process)
+                return
+            await asyncio.sleep(self.resource_poll_interval)
+
     async def _drain_stream(
         self,
         execution_id: str,
@@ -263,7 +298,9 @@ class ExecutionRunner:
         stderr_state = {"truncated": False}
         stream_tasks: list[asyncio.Task[None]] = []
         heartbeat_task: asyncio.Task[None] | None = None
+        workspace_task: asyncio.Task[None] | None = None
         lease_lost = asyncio.Event()
+        workspace_exceeded = asyncio.Event()
         timed_out = False
         process: asyncio.subprocess.Process | None = None
 
@@ -275,6 +312,35 @@ class ExecutionRunner:
             ):
                 return
             self.workspaces.snapshot(execution_id, "before")
+
+            workspace_limit = spec.resource_limits.workspace_bytes
+            if workspace_limit is not None:
+                initial_usage = self.workspaces.usage_bytes(execution_id)
+                if initial_usage > workspace_limit:
+                    self.store.add_effect(
+                        execution_id,
+                        "resource_limit_exceeded",
+                        {
+                            "resource": "workspace_bytes",
+                            "limit": workspace_limit,
+                            "observed": initial_usage,
+                            "phase": "before_launch",
+                        },
+                    )
+                    self.workspaces.snapshot(execution_id, "after")
+                    self.store.finish(
+                        execution_id,
+                        ExecutionStatus.RESOURCE_EXHAUSTED,
+                        exit_code=None,
+                        stdout="",
+                        stderr=(
+                            "workspace limit exceeded before process launch: "
+                            f"{initial_usage} > {workspace_limit}"
+                        ),
+                        lease_token=lease_token,
+                    )
+                    return
+
             if not self.store.renew_lease(
                 execution_id,
                 lease_token,
@@ -283,20 +349,25 @@ class ExecutionRunner:
                 return
             env = os.environ.copy()
             env.update(spec.env)
+            configured_limits = spec.resource_limits.configured()
+            if configured_limits:
+                self.store.add_effect(
+                    execution_id,
+                    "resource_limits_configured",
+                    configured_limits,
+                )
             self.store.add_effect(
                 execution_id,
                 "process_starting",
-                {"argv": spec.argv, "cwd": str(Path(execution_id))},
+                {
+                    "argv": spec.argv,
+                    "cwd": str(Path(execution_id)),
+                    "backend": self.backend.name,
+                },
             )
 
-            process = await asyncio.create_subprocess_exec(
-                *spec.argv,
-                cwd=workspace,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name == "posix",
-            )
+            launched = await self.backend.launch(spec, workspace, env)
+            process = launched.process
             self._processes[execution_id] = process
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("subprocess pipes were not created")
@@ -345,6 +416,15 @@ class ExecutionRunner:
                     lease_lost,
                 )
             )
+            if workspace_limit is not None:
+                workspace_task = asyncio.create_task(
+                    self._monitor_workspace_limit(
+                        execution_id,
+                        process,
+                        workspace_limit,
+                        workspace_exceeded,
+                    )
+                )
 
             if self._stopping.is_set():
                 self._shutdown_ids.add(execution_id)
@@ -363,6 +443,9 @@ class ExecutionRunner:
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if workspace_task is not None:
+                workspace_task.cancel()
+                await asyncio.gather(workspace_task, return_exceptions=True)
 
             # Revalidate ownership immediately before publishing final evidence/state.
             if lease_lost.is_set() or not self.store.renew_lease(
@@ -385,11 +468,31 @@ class ExecutionRunner:
             )
             self.workspaces.snapshot(execution_id, "after")
 
+            resource_reason = None
+            if workspace_exceeded.is_set():
+                resource_reason = "workspace_bytes"
+            else:
+                resource_reason = self.backend.resource_exit_reason(
+                    process.returncode,
+                    spec,
+                )
+                if resource_reason is not None:
+                    self.store.add_effect(
+                        execution_id,
+                        "resource_limit_exceeded",
+                        {
+                            "resource": resource_reason,
+                            "returncode": process.returncode,
+                        },
+                    )
+
             latest = self.store.get(execution_id)
             if latest.cancel_requested:
                 status = ExecutionStatus.CANCELLED
             elif execution_id in self._shutdown_ids:
                 status = ExecutionStatus.INTERRUPTED
+            elif resource_reason is not None:
+                status = ExecutionStatus.RESOURCE_EXHAUSTED
             elif timed_out:
                 status = ExecutionStatus.TIMED_OUT
             else:
@@ -425,6 +528,9 @@ class ExecutionRunner:
             if heartbeat_task is not None and not heartbeat_task.done():
                 heartbeat_task.cancel()
                 await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if workspace_task is not None and not workspace_task.done():
+                workspace_task.cancel()
+                await asyncio.gather(workspace_task, return_exceptions=True)
             for task in stream_tasks:
                 if not task.done():
                     task.cancel()
