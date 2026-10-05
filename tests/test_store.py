@@ -452,3 +452,109 @@ def test_expired_lease_can_schedule_interrupted_retry(tmp_path: Path):
     )
     assert final.status == ExecutionStatus.SUCCEEDED
     store.close()
+
+
+def test_operational_stats_distinguish_ready_and_delayed_queue(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    base = utc_now()
+
+    ready, _ = store.create_execution(
+        ExecutionSpec(argv=["echo", "ready"]),
+        "stats-ready",
+    )
+    delayed, _ = store.create_execution(
+        ExecutionSpec(
+            argv=["echo", "delayed"],
+            retry_policy={
+                "max_attempts": 2,
+                "retry_on": ["FAILED"],
+                "backoff_initial_seconds": 30,
+            },
+        ),
+        "stats-delayed",
+    )
+
+    claim = store.claim_next("worker-a", lease_seconds=60, now=base)
+    assert claim is not None
+    assert claim.execution.id == ready.id
+    store.finish(
+        ready.id,
+        ExecutionStatus.SUCCEEDED,
+        exit_code=0,
+        stdout="",
+        stderr="",
+        lease_token=claim.lease_token,
+        now=base + timedelta(seconds=1),
+    )
+
+    claim = store.claim_next("worker-a", lease_seconds=60, now=base + timedelta(seconds=2))
+    assert claim is not None
+    assert claim.execution.id == delayed.id
+    queued = store.finish(
+        delayed.id,
+        ExecutionStatus.FAILED,
+        exit_code=1,
+        stdout="",
+        stderr="retry",
+        lease_token=claim.lease_token,
+        now=base + timedelta(seconds=3),
+    )
+    assert queued.status == ExecutionStatus.QUEUED
+
+    stats = store.operational_stats(base + timedelta(seconds=4))
+    assert stats["status_counts"]["SUCCEEDED"] == 1
+    assert stats["status_counts"]["QUEUED"] == 1
+    assert stats["queue_ready"] == 0
+    assert stats["queue_delayed"] == 1
+    assert stats["attempts_total"] == 2
+    assert stats["idempotency_keys"] == 2
+    store.close()
+
+
+def test_workspace_retention_candidates_require_snapshot_and_old_terminal_state(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    base = utc_now()
+
+    snapshotted, _ = store.create_execution(
+        ExecutionSpec(argv=["echo", "a"]),
+        "retention-a",
+    )
+    claim = store.claim_next("worker-a", lease_seconds=60, now=base)
+    assert claim is not None
+    store.add_snapshot(
+        snapshotted.id,
+        "before",
+        "0" * 64,
+        [],
+    )
+    store.finish(
+        snapshotted.id,
+        ExecutionStatus.SUCCEEDED,
+        exit_code=0,
+        stdout="",
+        stderr="",
+        lease_token=claim.lease_token,
+        now=base + timedelta(seconds=1),
+    )
+
+    no_snapshot, _ = store.create_execution(
+        ExecutionSpec(argv=["echo", "b"]),
+        "retention-b",
+    )
+    claim = store.claim_next("worker-a", lease_seconds=60, now=base + timedelta(seconds=2))
+    assert claim is not None
+    assert claim.execution.id == no_snapshot.id
+    store.finish(
+        no_snapshot.id,
+        ExecutionStatus.SUCCEEDED,
+        exit_code=0,
+        stdout="",
+        stderr="",
+        lease_token=claim.lease_token,
+        now=base + timedelta(seconds=3),
+    )
+
+    candidates = store.workspace_retention_candidates(base + timedelta(seconds=10))
+    assert snapshotted.id in candidates
+    assert no_snapshot.id not in candidates
+    store.close()
