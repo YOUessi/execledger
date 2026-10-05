@@ -351,6 +351,15 @@ class ExecutionRunner:
 
             launched = await self.backend.launch(spec, workspace, env)
             process = launched.process
+            if launched.applied_limits:
+                self.store.add_effect(
+                    execution_id,
+                    "resource_limits_applied",
+                    {
+                        "backend": launched.backend,
+                        **launched.applied_limits,
+                    },
+                )
             self._processes[execution_id] = process
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("subprocess pipes were not created")
@@ -450,6 +459,21 @@ class ExecutionRunner:
                 },
             )
             self.workspaces.snapshot(execution_id, "after")
+
+            if workspace_limit is not None and not workspace_exceeded.is_set():
+                final_usage = self.workspaces.usage_bytes(execution_id)
+                if final_usage > workspace_limit:
+                    workspace_exceeded.set()
+                    self.store.add_effect(
+                        execution_id,
+                        "resource_limit_exceeded",
+                        {
+                            "resource": "workspace_bytes",
+                            "limit": workspace_limit,
+                            "observed": final_usage,
+                            "phase": "after_exit",
+                        },
+                    )
 
             resource_reason = None
             if workspace_exceeded.is_set():
