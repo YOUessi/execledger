@@ -29,6 +29,37 @@ TERMINAL_STATUSES = {
     ExecutionStatus.INTERRUPTED,
 }
 
+RETRYABLE_STATUSES = {
+    ExecutionStatus.FAILED,
+    ExecutionStatus.TIMED_OUT,
+    ExecutionStatus.INTERRUPTED,
+}
+
+
+class RetryPolicy(BaseModel):
+    max_attempts: Annotated[int, Field(ge=1, le=10)] = 1
+    retry_on: set[ExecutionStatus] = Field(default_factory=lambda: set(RETRYABLE_STATUSES))
+    backoff_initial_seconds: Annotated[float, Field(ge=0, le=3600)] = 0.5
+    backoff_multiplier: Annotated[float, Field(ge=1, le=10)] = 2.0
+    backoff_max_seconds: Annotated[float, Field(ge=0, le=3600)] = 60.0
+
+    @field_validator("retry_on")
+    @classmethod
+    def validate_retry_on(cls, value: set[ExecutionStatus]) -> set[ExecutionStatus]:
+        unsupported = value - RETRYABLE_STATUSES
+        if unsupported:
+            names = ", ".join(sorted(item.value for item in unsupported))
+            raise ValueError(f"retry_on contains unsupported statuses: {names}")
+        return value
+
+    def delay_after_attempt(self, attempt_number: int) -> float:
+        if attempt_number < 1:
+            raise ValueError("attempt_number must be positive")
+        delay = self.backoff_initial_seconds * (
+            self.backoff_multiplier ** (attempt_number - 1)
+        )
+        return min(delay, self.backoff_max_seconds)
+
 
 class ExecutionSpec(BaseModel):
     argv: Annotated[list[str], Field(min_length=1, max_length=64)]
@@ -36,6 +67,7 @@ class ExecutionSpec(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: Annotated[float, Field(gt=0, le=3600)] = 60.0
     max_output_bytes: Annotated[int, Field(ge=1024, le=4 * 1024 * 1024)] = 256 * 1024
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
 
     @field_validator("argv")
     @classmethod
@@ -68,6 +100,7 @@ class ExecutionRecord(BaseModel):
     cancel_requested: bool = False
     worker_id: str | None = None
     lease_expires_at: datetime | None = None
+    next_attempt_at: datetime | None = None
 
 
 class AttemptRecord(BaseModel):
