@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0
+
+- Added an execution-backend protocol so process creation is separated from durable scheduling and lifecycle state.
+- Added the built-in resource-aware `subprocess` backend.
+- Added a dedicated POSIX launcher that applies resource limits before target exec without server-process `preexec_fn`.
+- Added optional CPU, virtual-memory, file-size, open-file and process-count limits.
+- Added per-attempt resource usage for wall time, user/system CPU, peak RSS and context switches.
+- Persisted resource usage on attempt history and the logical execution's latest result.
+- Preserved missing-executable semantics through an exec-error channel in the launcher.
+- Added schema migration version 4 for resource-usage payloads.
+- Added backend capability reporting to diagnostics and Prometheus metrics.
+- Added Web console resource-usage cards and a resource-limited example request.
+- Added backend integration tests for usage accounting, file-size enforcement and launch failures.
+
 ## 0.8.0
 
 - Added a structured diagnostics endpoint with queue, lease, worker, storage and database statistics.
