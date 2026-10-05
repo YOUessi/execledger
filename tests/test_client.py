@@ -92,6 +92,8 @@ class _Handler(BaseHTTPRequestHandler):
                     "workers_configured": 2,
                     "active_processes": 1,
                     "stopping": False,
+                    "backend": "subprocess",
+                    "resource_limits_supported": True,
                     "status_counts": {
                         "QUEUED": 1,
                         "RUNNING": 1,
