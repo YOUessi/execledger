@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0
+
+- Added a structured diagnostics endpoint with queue, lease, worker, storage and database statistics.
+- Added a Prometheus-compatible `/metrics` endpoint without a new runtime dependency.
+- Added a separate `/readyz` readiness check while keeping `/healthz` lightweight.
+- Added CLI and Python client access to readiness and diagnostics.
+- Added diagnostics cards and direct metrics/JSON links to the built-in Web console.
+- Added opt-in age-based retention for terminal execution workspaces.
+- Required at least one durable snapshot before a terminal workspace can be deleted.
+- Kept queued, retry-backoff, running and unsnapshotted terminal workspaces out of retention.
+- Extended GC reports with workspace eligibility and reclaimed byte accounting.
+- Added tests for metrics rendering, diagnostics, queue/backoff statistics and safe workspace retention.
+
 ## 0.7.0
 
 - Added dry-run-first garbage collection for unreferenced content-addressed snapshot blobs.

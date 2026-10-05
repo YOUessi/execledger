@@ -7,21 +7,24 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from execledger.models import (
     TERMINAL_STATUSES,
     AttemptRecord,
+    DiagnosticsReport,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
     GarbageCollectionReport,
+    ReadinessReport,
     RestoreRecord,
     SnapshotRecord,
     SubmitResult,
     WorkspaceDiff,
 )
+from execledger.observability import render_prometheus
 from execledger.service import ExecutionService
 from execledger.store import IdempotencyConflict
 from execledger.workspace import SnapshotNotRestorable, UnsafeWorkspacePath
@@ -53,7 +56,7 @@ def create_app(
             await service.stop()
             service.store.close()
 
-    app = FastAPI(title="ExecLedger", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="ExecLedger", version="0.8.0", lifespan=lifespan)
     app.state.service = service
 
     @app.get("/", include_in_schema=False)
@@ -74,6 +77,27 @@ def create_app(
             "worker_id": service.runner.worker_id,
             "lease_seconds": lease_seconds,
         }
+
+    @app.get("/readyz", response_model=ReadinessReport)
+    async def readyz():
+        report = service.readiness()
+        if not report.ready:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=report.model_dump(mode="json"),
+            )
+        return report
+
+    @app.get("/v1/diagnostics", response_model=DiagnosticsReport)
+    async def diagnostics():
+        return service.diagnostics()
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics():
+        return PlainTextResponse(
+            render_prometheus(service.diagnostics()),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.post("/v1/executions", response_model=SubmitResult, status_code=status.HTTP_201_CREATED)
     async def submit_execution(
@@ -180,11 +204,13 @@ def create_app(
     async def run_storage_gc(
         apply: bool = Query(default=False),
         restore_older_than_seconds: float | None = Query(default=None, ge=0),
+        workspace_older_than_seconds: float | None = Query(default=None, ge=0),
     ):
         try:
             return service.maintenance.collect(
                 dry_run=not apply,
                 restore_older_than_seconds=restore_older_than_seconds,
+                workspace_older_than_seconds=workspace_older_than_seconds,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

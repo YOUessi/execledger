@@ -286,3 +286,44 @@ Restored workspaces are derived copies rather than durable evidence roots. GC ca
 Restore cleanup is disabled unless an age threshold is explicitly provided. Dry-run mode reports eligible directory names and byte counts without mutating them.
 
 Execution workspaces themselves are not deleted by v0.7 GC. Their lifecycle remains independent because they may still be useful for debugging or future retry policy.
+
+
+## Observability model
+
+ExecLedger derives operational state from the same durable SQLite rows that drive scheduling. Observability is therefore not maintained in a separate in-memory counter system.
+
+The structured diagnostics endpoint reports:
+
+- execution counts by durable status;
+- immediately claimable queue depth;
+- queued executions delayed by retry backoff;
+- valid and expired worker leases;
+- active child processes owned by the current service;
+- aggregate attempt/effect/snapshot/idempotency counts;
+- content-addressed blob count and bytes;
+- workspace and restored-copy count/bytes;
+- SQLite database and WAL sizes.
+
+`/metrics` renders these diagnostics as Prometheus-compatible gauges. The current implementation intentionally derives values on scrape instead of introducing a second metrics persistence dependency.
+
+### Liveness vs readiness
+
+`/healthz` is intentionally shallow: if the HTTP process can answer, it reports liveness.
+
+`/readyz` checks that SQLite answers and that the state, workspace and blob roots are present. A failed readiness check returns HTTP 503 so a supervisor can stop routing new traffic without conflating that condition with process death.
+
+## Execution workspace retention
+
+Content-addressed snapshot objects are the durable historical representation. Execution workspaces are mutable run directories and can eventually be reclaimed.
+
+Workspace retention is integrated into the same dry-run-first maintenance operation as blob/restore GC. An execution workspace is eligible only when:
+
+- the execution is in a terminal status;
+- `finished_at` is older than the requested cutoff;
+- at least one durable snapshot exists.
+
+The snapshot requirement is deliberate. A terminal workspace with no snapshot may still contain the only surviving copy of its inputs or partial state, so maintenance keeps it.
+
+Queued executions waiting for their first run or for retry backoff are never candidates. Running work is never a candidate.
+
+Workspace deletion does not remove SQLite execution history, attempts, effects, idempotency mappings, snapshot metadata or referenced blob objects.

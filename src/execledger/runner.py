@@ -74,6 +74,18 @@ class ExecutionRunner:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "worker_id": self.worker_id,
+            "workers_configured": self.workers,
+            "active_processes": sum(
+                1 for process in self._processes.values() if process.returncode is None
+            ),
+            "stopping": self._stopping.is_set(),
+            "lease_seconds": self.lease_seconds,
+            "heartbeat_interval": self.heartbeat_interval,
+        }
+
     async def cancel(self, execution_id: str) -> ExecutionRecord:
         record = self.store.request_cancel(execution_id)
         process = self._processes.get(execution_id)

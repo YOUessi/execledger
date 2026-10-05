@@ -19,7 +19,7 @@ Agent workflows fail in more ways than “the command returned non-zero”:
 
 ExecLedger turns those failure modes into explicit control-plane state: idempotency, leases, attempts, process-tree ownership, durable effect logs, resumable event streams, and workspace snapshots.
 
-## Implemented in v0.7
+## Implemented in v0.8
 
 ### Durable execution state
 
@@ -81,11 +81,22 @@ Lease expiry follows the same retry policy, so worker loss can be retried withou
 
 - Dry-run-first garbage collection for unreferenced content-addressed blobs.
 - Optional pruning of restored snapshot copies older than a configured age.
+- Optional pruning of **terminal execution workspaces** older than a configured age.
+- Workspace deletion requires the execution to be terminal **and** have at least one durable snapshot.
 - Snapshot manifests are scanned before deletion; malformed manifests fail GC closed.
 - Referenced blobs are never deleted.
 - Snapshot creation, snapshot restore, and GC share a cross-process maintenance lock so deletion cannot race with snapshot materialization.
 - GC reports reclaimable and reclaimed bytes separately.
 - REST API, Python client, CLI and Web console controls are available.
+
+### Observability and readiness
+
+- `/healthz` for lightweight process liveness.
+- `/readyz` for database/state-root readiness checks.
+- `/v1/diagnostics` for structured queue, lease, worker, database, snapshot and storage diagnostics.
+- `/metrics` exposes Prometheus-compatible gauges without adding a metrics runtime dependency.
+- Diagnostics distinguish immediately claimable queued work from jobs delayed by retry backoff.
+- The Web console shows queue pressure, active processes, expired leases and storage size at a glance.
 
 ### Operator interfaces
 
@@ -136,6 +147,8 @@ execledger effects EXECUTION_ID
 execledger snapshots EXECUTION_ID
 execledger diff EXECUTION_ID BEFORE_SNAPSHOT_ID AFTER_SNAPSHOT_ID
 execledger restore EXECUTION_ID SNAPSHOT_ID
+execledger ready
+execledger diagnostics
 execledger gc
 execledger gc --apply
 execledger cancel EXECUTION_ID
@@ -193,7 +206,8 @@ src/execledger/
   store.py      SQLite state, migrations, leases, attempts and evidence
   workspace.py  path safety + snapshot/diff/restore logic
   blobstore.py  content-addressed snapshot bytes
-  maintenance.py storage GC and restore retention
+  maintenance.py storage GC, restore retention and workspace retention
+  observability.py Prometheus diagnostics rendering
   locking.py    cross-process snapshot/GC coordination
   web/          built-in operator console (HTML/CSS/JS)
 
@@ -206,11 +220,11 @@ examples/       runnable execution payload
 
 ExecLedger does not pretend that a directory is a secure sandbox. For hostile or mutually untrusted workloads, place the runner behind a real container/VM/sandbox boundary and keep ExecLedger as the control plane.
 
-v0.7 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
+v0.8 supports policy-driven automatic retry, but retries remain **opt-in** because replaying an arbitrary command can duplicate external side effects. ExecLedger does not claim exactly-once semantics for effects outside its own durable control plane.
 
 The Web console is an operator interface, not an authentication boundary. ExecLedger is still intended for trusted/local control-plane deployments unless an external access-control layer is placed in front of it.
 
-Other planned reliability work includes execution-workspace retention policy, richer schema migration tooling, metrics/health diagnostics, and stronger operational access controls.
+Other planned reliability work includes richer schema migration tooling, historical execution compaction, authentication/authorization boundaries, and deeper process/resource accounting.
 
 
 ## Restorable snapshots
@@ -322,3 +336,58 @@ GC distinguishes **reclaimable** bytes from bytes actually reclaimed. Blob delet
 Snapshot creation, restore, and GC serialize on the same state-root maintenance lock. This prevents a newly written snapshot blob from being observed as unreferenced and deleted before its snapshot metadata is committed.
 
 Malformed snapshot manifests abort GC before deletion. This fail-closed behavior favors retaining extra storage over losing historical evidence.
+
+
+## Readiness, diagnostics, and metrics
+
+Use lightweight liveness for process supervisors:
+
+```text
+GET /healthz
+```
+
+Use readiness when deciding whether the service should receive traffic:
+
+```text
+GET /readyz
+```
+
+The structured diagnostics endpoint aggregates durable SQLite state with local runtime/storage information:
+
+```bash
+execledger diagnostics
+# or
+curl http://127.0.0.1:8080/v1/diagnostics
+```
+
+It reports execution counts by status, ready vs delayed queue depth, valid/expired leases, active child processes, attempts/effects/snapshots, blob/workspace/restore sizes, and SQLite/WAL sizes.
+
+Prometheus-compatible metrics are available at:
+
+```text
+GET /metrics
+```
+
+The metrics are derived from the same durable state used by the JSON diagnostics endpoint, so the Web console, CLI diagnostics and monitoring scrape use one definition of queue/lease state.
+
+## Execution workspace retention
+
+Workspace deletion is opt-in and remains dry-run first:
+
+```bash
+execledger gc --workspace-older-than-seconds 604800
+```
+
+Apply after reviewing the eligible execution IDs and reclaimable bytes:
+
+```bash
+execledger gc --apply --workspace-older-than-seconds 604800
+```
+
+ExecLedger only treats a workspace as eligible when:
+
+1. the logical execution is terminal;
+2. `finished_at` is older than the requested threshold;
+3. at least one durable snapshot exists for that execution.
+
+Queued, running, retry-backoff, and unsnapshotted terminal workspaces are retained. Deleting a workspace does not delete its execution history, attempts, effects, snapshots, or content-addressed snapshot blobs.

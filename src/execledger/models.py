@@ -180,6 +180,44 @@ class GarbageCollectionReport(BaseModel):
     restore_dirs_deleted: list[str]
     restore_bytes_reclaimable: int
     restore_bytes_reclaimed: int
+    workspaces_scanned: int
+    workspace_dirs_eligible: list[str]
+    workspace_dirs_deleted: list[str]
+    workspace_bytes_reclaimable: int
+    workspace_bytes_reclaimed: int
+
+
+class DiagnosticsReport(BaseModel):
+    generated_at: datetime
+    schema_version: int
+    worker_id: str
+    workers_configured: int
+    active_processes: int
+    stopping: bool
+    status_counts: dict[str, int]
+    queue_ready: int
+    queue_delayed: int
+    active_leases: int
+    expired_leases: int
+    attempts_total: int
+    effects_total: int
+    snapshots_total: int
+    idempotency_keys: int
+    blobs_total: int
+    blob_bytes: int
+    workspaces_total: int
+    workspace_bytes: int
+    restores_total: int
+    restore_bytes: int
+    database_bytes: int
+    wal_bytes: int
+
+
+class ReadinessReport(BaseModel):
+    ready: bool
+    checks: dict[str, bool]
+    schema_version: int
+    worker_id: str
 
 
 class SubmitResult(BaseModel):

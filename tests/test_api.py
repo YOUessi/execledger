@@ -211,7 +211,13 @@ def test_storage_gc_api_dry_run_and_apply(tmp_path: Path):
         orphan = service.workspaces.blobs.put(b"orphan-api-content")
         assert orphan not in referenced
 
-        dry = client.post("/v1/maintenance/gc")
+        workspace = service.workspaces.directory(execution_id)
+        assert workspace.exists()
+
+        dry = client.post(
+            "/v1/maintenance/gc",
+            params={"workspace_older_than_seconds": "0"},
+        )
         assert dry.status_code == 200
         dry_payload = dry.json()
         assert dry_payload["dry_run"] is True
@@ -219,10 +225,15 @@ def test_storage_gc_api_dry_run_and_apply(tmp_path: Path):
             item["digest"] for item in dry_payload["orphan_blobs"]
         }
         assert service.workspaces.blobs.contains(orphan)
+        assert execution_id in dry_payload["workspace_dirs_eligible"]
+        assert workspace.exists()
 
         applied = client.post(
             "/v1/maintenance/gc",
-            params={"apply": "true"},
+            params={
+                "apply": "true",
+                "workspace_older_than_seconds": "0",
+            },
         )
         assert applied.status_code == 200
         applied_payload = applied.json()
@@ -231,5 +242,47 @@ def test_storage_gc_api_dry_run_and_apply(tmp_path: Path):
             item["digest"] for item in applied_payload["deleted_blobs"]
         }
         assert not service.workspaces.blobs.contains(orphan)
+        assert execution_id in applied_payload["workspace_dirs_deleted"]
+        assert not workspace.exists()
         for digest in referenced:
             assert service.workspaces.blobs.contains(digest)
+
+
+def test_readiness_diagnostics_and_prometheus_metrics(tmp_path: Path):
+    app = create_app(
+        tmp_path,
+        workers=1,
+        worker_id="diagnostic-worker",
+    )
+    with TestClient(app) as client:
+        ready = client.get("/readyz")
+        assert ready.status_code == 200
+        ready_payload = ready.json()
+        assert ready_payload["ready"] is True
+        assert ready_payload["checks"]["database"] is True
+        assert ready_payload["worker_id"] == "diagnostic-worker"
+
+        created = client.post(
+            "/v1/executions",
+            headers={"Idempotency-Key": "diagnostics-key"},
+            json={"argv": [sys.executable, "-c", "print('diagnostic')"]},
+        )
+        execution_id = created.json()["execution"]["id"]
+        assert _wait_terminal(client, execution_id)["status"] == "SUCCEEDED"
+
+        diagnostics = client.get("/v1/diagnostics")
+        assert diagnostics.status_code == 200
+        payload = diagnostics.json()
+        assert payload["worker_id"] == "diagnostic-worker"
+        assert payload["workers_configured"] == 1
+        assert payload["status_counts"]["SUCCEEDED"] >= 1
+        assert payload["snapshots_total"] >= 2
+        assert payload["blobs_total"] >= 0
+        assert payload["database_bytes"] > 0
+
+        metrics = client.get("/metrics")
+        assert metrics.status_code == 200
+        assert "text/plain" in metrics.headers["content-type"]
+        assert "execledger_queue_ready " in metrics.text
+        assert 'execledger_executions{status="SUCCEEDED"}' in metrics.text
+        assert "execledger_database_bytes " in metrics.text

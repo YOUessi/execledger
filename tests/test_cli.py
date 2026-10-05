@@ -65,11 +65,28 @@ def test_cli_gc_parser_defaults_to_dry_run():
     assert args.command == "gc"
     assert args.apply is False
     assert args.restore_older_than_seconds is None
+    assert args.workspace_older_than_seconds is None
 
 
 def test_cli_gc_parser_accepts_apply_and_restore_retention():
     args = build_parser().parse_args(
-        ["gc", "--apply", "--restore-older-than-seconds", "3600"]
+        [
+            "gc",
+            "--apply",
+            "--restore-older-than-seconds",
+            "3600",
+            "--workspace-older-than-seconds",
+            "7200",
+        ]
     )
     assert args.apply is True
     assert args.restore_older_than_seconds == 3600
+    assert args.workspace_older_than_seconds == 7200
+
+
+def test_cli_readiness_and_diagnostics_parsers():
+    ready = build_parser().parse_args(["ready"])
+    assert ready.command == "ready"
+
+    diagnostics = build_parser().parse_args(["diagnostics"])
+    assert diagnostics.command == "diagnostics"
