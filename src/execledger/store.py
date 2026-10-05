@@ -653,6 +653,7 @@ class ExecutionStore:
         stdout: str,
         stderr: str,
         lease_token: str | None = None,
+        usage: ResourceUsage | None = None,
         now: datetime | None = None,
     ) -> ExecutionRecord:
         now_dt = now or utc_now()
@@ -695,17 +696,24 @@ class ExecutionStore:
                     now_dt,
                 )
 
+                usage_json = (
+                    json.dumps(usage.model_dump(mode="json"), sort_keys=True)
+                    if usage is not None
+                    else None
+                )
+
                 if attempt_number > 0:
                     self._conn.execute(
                         """
                         UPDATE attempts
-                        SET status = ?, finished_at = ?, exit_code = ?
+                        SET status = ?, finished_at = ?, exit_code = ?, usage_json = ?
                         WHERE execution_id = ? AND number = ?
                         """,
                         (
                             status.value,
                             now_text,
                             exit_code,
+                            usage_json,
                             execution_id,
                             attempt_number,
                         ),
@@ -717,7 +725,7 @@ class ExecutionStore:
                         """
                         UPDATE executions
                         SET status = ?, updated_at = ?, finished_at = NULL,
-                            exit_code = NULL, stdout = ?, stderr = ?,
+                            exit_code = NULL, stdout = ?, stderr = ?, usage_json = ?,
                             worker_id = NULL, lease_token = NULL,
                             lease_expires_at = NULL, next_attempt_at = ?
                         WHERE id = ?
@@ -727,6 +735,7 @@ class ExecutionStore:
                             now_text,
                             stdout,
                             stderr,
+                            usage_json,
                             next_attempt_at,
                             execution_id,
                         ),
@@ -743,7 +752,7 @@ class ExecutionStore:
                         """
                         UPDATE executions
                         SET status = ?, updated_at = ?, finished_at = ?,
-                            exit_code = ?, stdout = ?, stderr = ?,
+                            exit_code = ?, stdout = ?, stderr = ?, usage_json = ?,
                             worker_id = NULL, lease_token = NULL,
                             lease_expires_at = NULL, next_attempt_at = NULL
                         WHERE id = ?
@@ -755,6 +764,7 @@ class ExecutionStore:
                             exit_code,
                             stdout,
                             stderr,
+                            usage_json,
                             execution_id,
                         ),
                     )
