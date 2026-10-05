@@ -36,6 +36,10 @@ class ProcessBackend(Protocol):
         env: dict[str, str],
     ) -> BackendLaunch: ...
 
+    def terminate(self, process: asyncio.subprocess.Process) -> None: ...
+
+    def kill(self, process: asyncio.subprocess.Process) -> None: ...
+
     def resource_exit_reason(
         self,
         returncode: int | None,
@@ -103,6 +107,26 @@ class LocalProcessBackend:
             backend=self.name,
             applied_limits=kernel_limits,
         )
+
+    def terminate(self, process: asyncio.subprocess.Process) -> None:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            return
+        if process.returncode is None:
+            process.terminate()
+
+    def kill(self, process: asyncio.subprocess.Process) -> None:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            return
+        if process.returncode is None:
+            process.kill()
 
     def resource_exit_reason(
         self,
