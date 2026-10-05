@@ -124,7 +124,9 @@ def test_expired_lease_becomes_interrupted(tmp_path: Path):
     assert first.renew_lease(record.id, claim.lease_token, lease_seconds=5) is False
     attempts = first.attempts(record.id)
     assert attempts[0].status == ExecutionStatus.INTERRUPTED
-    assert first.effects(record.id)[-1].kind == "lease_expired"
+    effects = first.effects(record.id)
+    assert any(effect.kind == "lease_expired" for effect in effects)
+    assert effects[-1].kind == "execution_finished"
 
     first.close()
     second.close()
@@ -217,10 +219,218 @@ def test_v01_database_migrates_in_place(tmp_path: Path):
     conn.close()
 
     store = ExecutionStore(db)
-    assert store.schema_version == 2
+    assert store.schema_version == 3
     migrated = store.get("legacy-execution")
     assert migrated.status == ExecutionStatus.QUEUED
     assert migrated.worker_id is None
     assert migrated.lease_expires_at is None
+    assert migrated.next_attempt_at is None
     assert store.attempts("legacy-execution") == []
+    store.close()
+
+
+def test_failed_attempt_requeues_until_retry_budget_is_exhausted(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    base = utc_now()
+    spec = ExecutionSpec(
+        argv=["echo", "retry"],
+        retry_policy={
+            "max_attempts": 2,
+            "retry_on": ["FAILED"],
+            "backoff_initial_seconds": 5,
+            "backoff_multiplier": 2,
+            "backoff_max_seconds": 30,
+        },
+    )
+    record, _ = store.create_execution(spec, "retry-budget")
+
+    first = store.claim_next("worker-a", lease_seconds=60, now=base)
+    assert first is not None
+    queued = store.finish(
+        record.id,
+        ExecutionStatus.FAILED,
+        exit_code=7,
+        stdout="",
+        stderr="first failure",
+        lease_token=first.lease_token,
+        now=base + timedelta(seconds=1),
+    )
+    assert queued.status == ExecutionStatus.QUEUED
+    assert queued.attempt == 1
+    assert queued.next_attempt_at == base + timedelta(seconds=6)
+    assert queued.stderr == "first failure"
+
+    assert (
+        store.claim_next(
+            "worker-b",
+            lease_seconds=60,
+            now=base + timedelta(seconds=5),
+        )
+        is None
+    )
+    second = store.claim_next(
+        "worker-b",
+        lease_seconds=60,
+        now=base + timedelta(seconds=6),
+    )
+    assert second is not None
+    assert second.execution.attempt == 2
+
+    final = store.finish(
+        record.id,
+        ExecutionStatus.FAILED,
+        exit_code=8,
+        stdout="",
+        stderr="second failure",
+        lease_token=second.lease_token,
+        now=base + timedelta(seconds=7),
+    )
+    assert final.status == ExecutionStatus.FAILED
+    assert final.attempt == 2
+    assert final.next_attempt_at is None
+    assert final.exit_code == 8
+
+    attempts = store.attempts(record.id)
+    assert [attempt.status for attempt in attempts] == [
+        ExecutionStatus.FAILED,
+        ExecutionStatus.FAILED,
+    ]
+    effects = store.effects(record.id)
+    assert [effect.kind for effect in effects].count("retry_scheduled") == 1
+    assert effects[-1].kind == "execution_finished"
+    store.close()
+
+
+def test_retry_backoff_is_exponential_and_capped(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    base = utc_now()
+    spec = ExecutionSpec(
+        argv=["echo", "retry"],
+        retry_policy={
+            "max_attempts": 4,
+            "retry_on": ["FAILED"],
+            "backoff_initial_seconds": 3,
+            "backoff_multiplier": 4,
+            "backoff_max_seconds": 10,
+        },
+    )
+    record, _ = store.create_execution(spec, "retry-backoff")
+
+    expected_delays = [3, 10, 10]
+    now = base
+    for attempt_number, delay in enumerate(expected_delays, start=1):
+        claim = store.claim_next("worker-a", lease_seconds=60, now=now)
+        assert claim is not None
+        finished_at = now + timedelta(seconds=1)
+        queued = store.finish(
+            record.id,
+            ExecutionStatus.FAILED,
+            exit_code=1,
+            stdout="",
+            stderr=f"attempt {attempt_number}",
+            lease_token=claim.lease_token,
+            now=finished_at,
+        )
+        assert queued.status == ExecutionStatus.QUEUED
+        assert queued.next_attempt_at == finished_at + timedelta(seconds=delay)
+        now = finished_at + timedelta(seconds=delay)
+
+    last = store.claim_next("worker-a", lease_seconds=60, now=now)
+    assert last is not None
+    final = store.finish(
+        record.id,
+        ExecutionStatus.SUCCEEDED,
+        exit_code=0,
+        stdout="ok",
+        stderr="",
+        lease_token=last.lease_token,
+        now=now + timedelta(seconds=1),
+    )
+    assert final.status == ExecutionStatus.SUCCEEDED
+    assert final.attempt == 4
+    store.close()
+
+
+def test_cancelled_backoff_does_not_run_again(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    base = utc_now()
+    spec = ExecutionSpec(
+        argv=["echo", "retry"],
+        retry_policy={
+            "max_attempts": 3,
+            "retry_on": ["FAILED"],
+            "backoff_initial_seconds": 30,
+        },
+    )
+    record, _ = store.create_execution(spec, "cancel-backoff")
+    claim = store.claim_next("worker-a", lease_seconds=60, now=base)
+    assert claim is not None
+    queued = store.finish(
+        record.id,
+        ExecutionStatus.FAILED,
+        exit_code=1,
+        stdout="",
+        stderr="failure",
+        lease_token=claim.lease_token,
+        now=base + timedelta(seconds=1),
+    )
+    assert queued.status == ExecutionStatus.QUEUED
+    assert queued.next_attempt_at is not None
+
+    cancelled = store.request_cancel(record.id)
+    assert cancelled.status == ExecutionStatus.CANCELLED
+    assert cancelled.next_attempt_at is None
+    assert store.claim_next(
+        "worker-b",
+        lease_seconds=60,
+        now=base + timedelta(hours=1),
+    ) is None
+    store.close()
+
+
+def test_expired_lease_can_schedule_interrupted_retry(tmp_path: Path):
+    store = ExecutionStore(tmp_path / "db.sqlite3")
+    base = utc_now()
+    spec = ExecutionSpec(
+        argv=["echo", "retry"],
+        retry_policy={
+            "max_attempts": 2,
+            "retry_on": ["INTERRUPTED"],
+            "backoff_initial_seconds": 4,
+        },
+    )
+    record, _ = store.create_execution(spec, "retry-expiry")
+    claim = store.claim_next("worker-a", lease_seconds=5, now=base)
+    assert claim is not None
+
+    expired_at = base + timedelta(seconds=10)
+    assert store.expire_leases(now=expired_at) == [record.id]
+    queued = store.get(record.id)
+    assert queued.status == ExecutionStatus.QUEUED
+    assert queued.next_attempt_at == expired_at + timedelta(seconds=4)
+    assert store.attempts(record.id)[0].status == ExecutionStatus.INTERRUPTED
+    kinds = [effect.kind for effect in store.effects(record.id)]
+    assert kinds[-2:] == ["lease_expired", "retry_scheduled"]
+
+    assert store.claim_next(
+        "worker-b",
+        lease_seconds=5,
+        now=expired_at + timedelta(seconds=3),
+    ) is None
+    second = store.claim_next(
+        "worker-b",
+        lease_seconds=5,
+        now=expired_at + timedelta(seconds=4),
+    )
+    assert second is not None
+    final = store.finish(
+        record.id,
+        ExecutionStatus.SUCCEEDED,
+        exit_code=0,
+        stdout="ok",
+        stderr="",
+        lease_token=second.lease_token,
+        now=expired_at + timedelta(seconds=5),
+    )
+    assert final.status == ExecutionStatus.SUCCEEDED
     store.close()
