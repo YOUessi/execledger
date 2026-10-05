@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import time
@@ -199,6 +200,10 @@ def test_v01_database_migrates_in_place(tmp_path: Path):
         """
     )
     spec = ExecutionSpec(argv=["echo", "legacy"])
+    legacy_payload = spec.model_dump(mode="json")
+    legacy_payload.pop("retry_policy")
+    legacy_json = json.dumps(legacy_payload, sort_keys=True, separators=(",", ":"))
+    legacy_hash = hashlib.sha256(legacy_json.encode()).hexdigest()
     now = utc_now().isoformat()
     conn.execute(
         """
@@ -208,12 +213,19 @@ def test_v01_database_migrates_in_place(tmp_path: Path):
         """,
         (
             "legacy-execution",
-            "request-hash",
-            json.dumps(spec.model_dump(mode="json")),
+            legacy_hash,
+            legacy_json,
             ExecutionStatus.QUEUED.value,
             now,
             now,
         ),
+    )
+    conn.execute(
+        """
+        INSERT INTO idempotency(key, request_hash, execution_id)
+        VALUES (?, ?, ?)
+        """,
+        ("legacy-key", legacy_hash, "legacy-execution"),
     )
     conn.commit()
     conn.close()
@@ -226,6 +238,10 @@ def test_v01_database_migrates_in_place(tmp_path: Path):
     assert migrated.lease_expires_at is None
     assert migrated.next_attempt_at is None
     assert store.attempts("legacy-execution") == []
+
+    replayed, created = store.create_execution(spec, "legacy-key")
+    assert created is False
+    assert replayed.id == "legacy-execution"
     store.close()
 
 
