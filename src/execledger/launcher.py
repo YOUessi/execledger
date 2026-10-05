@@ -18,20 +18,24 @@ def _bounded_limit(resource_id: int, requested: int) -> tuple[int, int]:
 
 
 def _apply_limits(limits: dict[str, int | None]) -> None:
-    mapping = [
-        ("max_cpu_seconds", resource.RLIMIT_CPU),
-        ("max_memory_bytes", resource.RLIMIT_AS),
-        ("max_file_bytes", resource.RLIMIT_FSIZE),
-        ("max_open_files", resource.RLIMIT_NOFILE),
-    ]
-    if hasattr(resource, "RLIMIT_NPROC"):
-        mapping.append(("max_processes", resource.RLIMIT_NPROC))
+    names = {
+        "max_cpu_seconds": "RLIMIT_CPU",
+        "max_memory_bytes": "RLIMIT_AS",
+        "max_file_bytes": "RLIMIT_FSIZE",
+        "max_open_files": "RLIMIT_NOFILE",
+        "max_processes": "RLIMIT_NPROC",
+    }
 
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    for key, resource_id in mapping:
+    if hasattr(resource, "RLIMIT_CORE"):
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+    for key, attribute in names.items():
         value = limits.get(key)
         if value is None:
             continue
+        if not hasattr(resource, attribute):
+            raise RuntimeError(f"{key} is unsupported on this POSIX platform")
+        resource_id = int(getattr(resource, attribute))
         resource.setrlimit(resource_id, _bounded_limit(resource_id, int(value)))
 
 
