@@ -181,3 +181,55 @@ def test_operator_console_is_served_from_same_origin(tmp_path: Path):
         styles = client.get("/ui/styles.css")
         assert styles.status_code == 200
         assert ".execution-item" in styles.text
+
+
+def test_storage_gc_api_dry_run_and_apply(tmp_path: Path):
+    app = create_app(tmp_path, workers=1)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/executions",
+            headers={"Idempotency-Key": "gc-api-key"},
+            json={
+                "argv": [sys.executable, "-c", "print('done')"],
+                "files": {"input.txt": "keep-me"},
+            },
+        )
+        execution_id = created.json()["execution"]["id"]
+        assert _wait_terminal(client, execution_id)["status"] == "SUCCEEDED"
+
+        snapshots = client.get(
+            f"/v1/executions/{execution_id}/snapshots"
+        ).json()
+        referenced = {
+            item["sha256"]
+            for snapshot in snapshots
+            for item in snapshot["manifest"]
+        }
+        assert referenced
+
+        service = app.state.service
+        orphan = service.workspaces.blobs.put(b"orphan-api-content")
+        assert orphan not in referenced
+
+        dry = client.post("/v1/maintenance/gc")
+        assert dry.status_code == 200
+        dry_payload = dry.json()
+        assert dry_payload["dry_run"] is True
+        assert orphan in {
+            item["digest"] for item in dry_payload["orphan_blobs"]
+        }
+        assert service.workspaces.blobs.contains(orphan)
+
+        applied = client.post(
+            "/v1/maintenance/gc",
+            params={"apply": "true"},
+        )
+        assert applied.status_code == 200
+        applied_payload = applied.json()
+        assert applied_payload["dry_run"] is False
+        assert orphan in {
+            item["digest"] for item in applied_payload["deleted_blobs"]
+        }
+        assert not service.workspaces.blobs.contains(orphan)
+        for digest in referenced:
+            assert service.workspaces.blobs.contains(digest)
