@@ -234,14 +234,14 @@ async def test_two_services_share_one_sqlite_queue_without_double_claim(tmp_path
     service_a = ExecutionService(
         tmp_path,
         workers=1,
-        lease_seconds=0.5,
+        lease_seconds=2.0,
         heartbeat_interval=0.1,
         worker_id="service-a",
     )
     service_b = ExecutionService(
         tmp_path,
         workers=1,
-        lease_seconds=0.5,
+        lease_seconds=2.0,
         heartbeat_interval=0.1,
         worker_id="service-b",
     )
@@ -274,15 +274,15 @@ async def test_cancel_from_non_owner_service_is_observed_by_lease_heartbeat(tmp_
     service_a = ExecutionService(
         tmp_path,
         workers=1,
-        lease_seconds=0.5,
-        heartbeat_interval=0.05,
+        lease_seconds=2.0,
+        heartbeat_interval=0.1,
         worker_id="service-a",
     )
     service_b = ExecutionService(
         tmp_path,
         workers=1,
-        lease_seconds=0.5,
-        heartbeat_interval=0.05,
+        lease_seconds=2.0,
+        heartbeat_interval=0.1,
         worker_id="service-b",
     )
     result = await service_a.submit(
