@@ -161,6 +161,27 @@ class RestoreRecord(BaseModel):
     snapshot_digest: str
 
 
+class GarbageBlob(BaseModel):
+    digest: str
+    size: int
+
+
+class GarbageCollectionReport(BaseModel):
+    dry_run: bool
+    snapshots_scanned: int
+    blobs_scanned: int
+    referenced_blobs: int
+    orphan_blobs: list[GarbageBlob]
+    deleted_blobs: list[GarbageBlob]
+    bytes_reclaimable: int
+    bytes_reclaimed: int
+    restores_scanned: int
+    restore_dirs_eligible: list[str]
+    restore_dirs_deleted: list[str]
+    restore_bytes_reclaimable: int
+    restore_bytes_reclaimed: int
+
+
 class SubmitResult(BaseModel):
     execution: ExecutionRecord
     created: bool
