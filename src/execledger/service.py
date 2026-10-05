@@ -112,6 +112,10 @@ class ExecutionService:
             workers_configured=int(runner_stats["workers_configured"]),
             active_processes=int(runner_stats["active_processes"]),
             stopping=bool(runner_stats["stopping"]),
+            backend=str(runner_stats["backend"]),
+            resource_limits_supported=bool(
+                runner_stats["resource_limits_supported"]
+            ),
             status_counts=dict(store_stats["status_counts"]),
             queue_ready=int(store_stats["queue_ready"]),
             queue_delayed=int(store_stats["queue_delayed"]),
