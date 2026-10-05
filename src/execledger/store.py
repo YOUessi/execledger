@@ -908,6 +908,12 @@ class ExecutionStore:
                     raise RuntimeError(
                         f"snapshot {row['id']} is missing a blob digest"
                     )
+                if len(digest) != 64 or any(
+                    char not in "0123456789abcdef" for char in digest
+                ):
+                    raise RuntimeError(
+                        f"snapshot {row['id']} has an invalid blob digest"
+                    )
                 references.add(digest)
         return references, len(rows)
 
