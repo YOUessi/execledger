@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from execledger.backends import ProcessBackend
 from execledger.models import (
     TERMINAL_STATUSES,
     AttemptRecord,
@@ -37,6 +38,7 @@ def create_app(
     lease_seconds: float = 5.0,
     heartbeat_interval: float | None = None,
     worker_id: str | None = None,
+    backend: ProcessBackend | None = None,
 ) -> FastAPI:
     state_root = root or Path(os.environ.get("EXECLEDGER_ROOT", ".execledger"))
     service = ExecutionService(
@@ -45,6 +47,7 @@ def create_app(
         lease_seconds=lease_seconds,
         heartbeat_interval=heartbeat_interval,
         worker_id=worker_id,
+        backend=backend,
     )
 
     @asynccontextmanager
@@ -76,6 +79,10 @@ def create_app(
             "workers": workers,
             "worker_id": service.runner.worker_id,
             "lease_seconds": lease_seconds,
+            "backend": service.runner.backend.name,
+            "kernel_resource_limits_supported": (
+                service.runner.backend.kernel_resource_limits_supported
+            ),
         }
 
     @app.get("/readyz", response_model=ReadinessReport)
