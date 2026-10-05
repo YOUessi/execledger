@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from execledger.backends import ProcessBackend
 from execledger.maintenance import StorageMaintenance
 from execledger.models import (
     TERMINAL_STATUSES,
@@ -27,6 +28,7 @@ class ExecutionService:
         lease_seconds: float = 5.0,
         heartbeat_interval: float | None = None,
         worker_id: str | None = None,
+        backend: ProcessBackend | None = None,
     ):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -46,6 +48,7 @@ class ExecutionService:
             lease_seconds=lease_seconds,
             heartbeat_interval=heartbeat_interval,
             worker_id=worker_id,
+            backend=backend,
         )
         self._started = False
 
@@ -109,6 +112,10 @@ class ExecutionService:
             generated_at=now,
             schema_version=self.store.schema_version,
             worker_id=str(runner_stats["worker_id"]),
+            backend=str(runner_stats["backend"]),
+            kernel_resource_limits_supported=bool(
+                runner_stats["kernel_resource_limits_supported"]
+            ),
             workers_configured=int(runner_stats["workers_configured"]),
             active_processes=int(runner_stats["active_processes"]),
             stopping=bool(runner_stats["stopping"]),
