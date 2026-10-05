@@ -72,19 +72,39 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    error_read, error_write = os.pipe()
+    os.set_inheritable(error_write, False)
+
     child_pid = os.fork()
     if child_pid == 0:
+        os.close(error_read)
         try:
             _apply_limits(limits)
-            os.execvpe(target[0], target, os.environ)
+            target_env = dict(os.environ)
+            target_env.pop("EXECLEDGER_RESOURCE_LIMITS", None)
+            os.execvpe(target[0], target, target_env)
         except BaseException as exc:
-            os.write(2, f"execledger launcher: {exc}\n".encode(errors="replace"))
+            message = f"{type(exc).__name__}: {exc}"
+            try:
+                os.write(error_write, message.encode(errors="replace"))
+            except OSError:
+                pass
+            os.write(2, f"execledger launcher: {message}\n".encode(errors="replace"))
             os._exit(127)
 
+    os.close(error_write)
     waited_pid, status, usage = os.wait4(child_pid, 0)
     assert waited_pid == child_pid
 
-    if os.WIFEXITED(status):
+    try:
+        exec_error_raw = os.read(error_read, 65536)
+    finally:
+        os.close(error_read)
+    exec_error = exec_error_raw.decode(errors="replace") or None
+
+    if exec_error is not None:
+        target_returncode: int | None = None
+    elif os.WIFEXITED(status):
         target_returncode = os.WEXITSTATUS(status)
     elif os.WIFSIGNALED(status):
         target_returncode = -os.WTERMSIG(status)
@@ -107,12 +127,15 @@ def main(argv: list[str] | None = None) -> int:
             "involuntary_context_switches": int(usage.ru_nivcsw),
         },
         "forwarded_signal": forwarded_signal,
+        "exec_error": exec_error,
     }
     try:
         _write_result(result_path, payload)
     except OSError as exc:
         print(f"execledger launcher: failed to write usage result: {exc}", file=sys.stderr)
 
+    if target_returncode is None:
+        return 127
     if target_returncode >= 0:
         return target_returncode
     return 128 + abs(target_returncode)
