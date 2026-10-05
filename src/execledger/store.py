@@ -50,6 +50,7 @@ _ALLOWED_TRANSITIONS: dict[ExecutionStatus, set[ExecutionStatus]] = {
         ExecutionStatus.TIMED_OUT,
         ExecutionStatus.CANCELLED,
         ExecutionStatus.INTERRUPTED,
+        ExecutionStatus.RESOURCE_EXHAUSTED,
     },
 }
 
@@ -561,6 +562,7 @@ class ExecutionStore:
             ExecutionStatus.TIMED_OUT,
             ExecutionStatus.CANCELLED,
             ExecutionStatus.INTERRUPTED,
+            ExecutionStatus.RESOURCE_EXHAUSTED,
         }:
             return current
         now = utc_now().isoformat()
