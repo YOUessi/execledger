@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from execledger.models import (
+    TERMINAL_STATUSES,
     AttemptRecord,
     EffectRecord,
     ExecutionRecord,
@@ -219,6 +220,99 @@ class ExecutionStore:
     def schema_version(self) -> int:
         with self._lock:
             return int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+
+    def ping(self) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1").fetchone()
+        return row is not None and int(row[0]) == 1
+
+    def operational_stats(self, now: datetime | None = None) -> dict[str, object]:
+        now_text = (now or utc_now()).isoformat()
+        status_counts = {status.value: 0 for status in ExecutionStatus}
+        with self._lock:
+            for row in self._conn.execute(
+                "SELECT status, COUNT(*) AS count FROM executions GROUP BY status"
+            ).fetchall():
+                status_counts[row["status"]] = int(row["count"])
+
+            queue_ready = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM executions
+                    WHERE status = ? AND cancel_requested = 0
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                    """,
+                    (ExecutionStatus.QUEUED.value, now_text),
+                ).fetchone()[0]
+            )
+            queue_delayed = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM executions
+                    WHERE status = ? AND cancel_requested = 0
+                      AND next_attempt_at > ?
+                    """,
+                    (ExecutionStatus.QUEUED.value, now_text),
+                ).fetchone()[0]
+            )
+            active_leases = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM executions
+                    WHERE status = ? AND lease_expires_at > ?
+                    """,
+                    (ExecutionStatus.RUNNING.value, now_text),
+                ).fetchone()[0]
+            )
+            expired_leases = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM executions
+                    WHERE status = ?
+                      AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                    """,
+                    (ExecutionStatus.RUNNING.value, now_text),
+                ).fetchone()[0]
+            )
+            attempts_total = int(self._conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0])
+            effects_total = int(self._conn.execute("SELECT COUNT(*) FROM effects").fetchone()[0])
+            snapshots_total = int(self._conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
+            idempotency_keys = int(
+                self._conn.execute("SELECT COUNT(*) FROM idempotency").fetchone()[0]
+            )
+
+        return {
+            "status_counts": status_counts,
+            "queue_ready": queue_ready,
+            "queue_delayed": queue_delayed,
+            "active_leases": active_leases,
+            "expired_leases": expired_leases,
+            "attempts_total": attempts_total,
+            "effects_total": effects_total,
+            "snapshots_total": snapshots_total,
+            "idempotency_keys": idempotency_keys,
+        }
+
+    def workspace_retention_candidates(self, cutoff: datetime) -> set[str]:
+        terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
+        placeholders = ",".join("?" for _ in terminal_values)
+        query = f"""
+            SELECT e.id
+            FROM executions AS e
+            WHERE e.status IN ({placeholders})
+              AND e.finished_at IS NOT NULL
+              AND e.finished_at <= ?
+              AND EXISTS (
+                  SELECT 1 FROM snapshots AS s
+                  WHERE s.execution_id = e.id
+              )
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                query,
+                (*terminal_values, cutoff.isoformat()),
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
 
     @staticmethod
     def _canonical_spec(spec: ExecutionSpec) -> str:
