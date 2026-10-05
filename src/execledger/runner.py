@@ -289,6 +289,20 @@ class ExecutionRunner:
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("subprocess pipes were not created")
 
+            if not self.store.renew_lease(
+                execution_id,
+                lease_token,
+                lease_seconds=self.lease_seconds,
+            ):
+                lease_lost.set()
+                self.store.add_effect(
+                    execution_id,
+                    "lease_lost_after_spawn",
+                    {},
+                )
+                await self._terminate_and_wait(process)
+                return
+
             stream_tasks = [
                 asyncio.create_task(
                     self._drain_stream(
