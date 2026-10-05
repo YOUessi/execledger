@@ -7,6 +7,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from execledger.models import ExecutionSpec, ResourceUsage
 
@@ -21,6 +22,25 @@ class SpawnedProcess:
 class BackendResult:
     exit_code: int | None
     resource_usage: ResourceUsage | None
+
+
+class ExecutionBackend(Protocol):
+    name: str
+
+    @property
+    def supports_resource_limits(self) -> bool: ...
+
+    async def spawn(
+        self,
+        execution_id: str,
+        attempt_number: int,
+        spec: ExecutionSpec,
+        *,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> SpawnedProcess: ...
+
+    def collect_result(self, spawned: SpawnedProcess) -> BackendResult: ...
 
 
 class SubprocessBackend:
