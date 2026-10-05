@@ -10,10 +10,12 @@ from typing import Any
 from execledger.models import (
     TERMINAL_STATUSES,
     AttemptRecord,
+    DiagnosticsReport,
     EffectRecord,
     ExecutionRecord,
     ExecutionSpec,
     GarbageCollectionReport,
+    ReadinessReport,
     RestoreRecord,
     SnapshotRecord,
     SubmitResult,
@@ -87,6 +89,14 @@ class ExecLedgerClient:
         value = self._request("GET", "/healthz")
         assert isinstance(value, dict)
         return value
+
+    def readiness(self) -> ReadinessReport:
+        value = self._request("GET", "/readyz")
+        return ReadinessReport.model_validate(value)
+
+    def diagnostics(self) -> DiagnosticsReport:
+        value = self._request("GET", "/v1/diagnostics")
+        return DiagnosticsReport.model_validate(value)
 
     def submit(self, spec: ExecutionSpec, idempotency_key: str) -> SubmitResult:
         value = self._request(
@@ -214,10 +224,13 @@ class ExecLedgerClient:
         *,
         apply: bool = False,
         restore_older_than_seconds: float | None = None,
+        workspace_older_than_seconds: float | None = None,
     ) -> GarbageCollectionReport:
         params = {"apply": "true" if apply else "false"}
         if restore_older_than_seconds is not None:
             params["restore_older_than_seconds"] = str(restore_older_than_seconds)
+        if workspace_older_than_seconds is not None:
+            params["workspace_older_than_seconds"] = str(workspace_older_than_seconds)
         query = urllib.parse.urlencode(params)
         value = self._request("POST", f"/v1/maintenance/gc?{query}")
         return GarbageCollectionReport.model_validate(value)
