@@ -232,6 +232,8 @@ class DiagnosticsReport(BaseModel):
     workers_configured: int
     active_processes: int
     stopping: bool
+    backend: str
+    resource_limits_supported: bool
     status_counts: dict[str, int]
     queue_ready: int
     queue_delayed: int
