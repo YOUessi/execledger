@@ -385,7 +385,7 @@ class ExecutionStore:
                         worker_id,
                         lease_token,
                         ExecutionStatus.RUNNING.value,
-                        now,
+                        now_text,
                     ),
                 )
                 self._conn.execute("COMMIT")
