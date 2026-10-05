@@ -88,7 +88,12 @@ class SubprocessBackend:
         try:
             payload = json.loads(spawned.result_path.read_text(encoding="utf-8"))
             usage = ResourceUsage.model_validate(payload["usage"])
-            exit_code = int(payload["target_returncode"])
+            raw_exit_code = payload.get("target_returncode")
+            exit_code = (
+                int(raw_exit_code)
+                if raw_exit_code is not None
+                else None
+            )
             return BackendResult(exit_code=exit_code, resource_usage=usage)
         except (OSError, ValueError, KeyError, TypeError):
             return BackendResult(
