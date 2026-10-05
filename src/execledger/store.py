@@ -316,14 +316,15 @@ class ExecutionStore:
         worker_id: str,
         *,
         lease_seconds: float = 5.0,
+        now: datetime | None = None,
     ) -> ClaimedExecution | None:
         if not worker_id:
             raise ValueError("worker_id must be non-empty")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
 
-        now_dt = utc_now()
-        now = now_dt.isoformat()
+        now_dt = now or utc_now()
+        now_text = now_dt.isoformat()
         expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
         lease_token = uuid.uuid4().hex
         attempt_id = uuid.uuid4().hex
@@ -335,9 +336,10 @@ class ExecutionStore:
                     """
                     SELECT id, attempt FROM executions
                     WHERE status = ? AND cancel_requested = 0
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                     ORDER BY created_at ASC LIMIT 1
                     """,
-                    (ExecutionStatus.QUEUED.value,),
+                    (ExecutionStatus.QUEUED.value, now_text),
                 ).fetchone()
                 if row is None:
                     self._conn.execute("COMMIT")
@@ -350,13 +352,14 @@ class ExecutionStore:
                     UPDATE executions
                     SET status = ?, started_at = COALESCE(started_at, ?),
                         updated_at = ?, attempt = ?, worker_id = ?,
-                        lease_token = ?, lease_expires_at = ?
+                        lease_token = ?, lease_expires_at = ?,
+                        next_attempt_at = NULL
                     WHERE id = ? AND status = ?
                     """,
                     (
                         ExecutionStatus.RUNNING.value,
-                        now,
-                        now,
+                        now_text,
+                        now_text,
                         attempt_number,
                         worker_id,
                         lease_token,
