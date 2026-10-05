@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from execledger.backend import SpawnedProcess, SubprocessBackend
+from execledger.backend import ExecutionBackend, SpawnedProcess, SubprocessBackend
 from execledger.models import ExecutionRecord, ExecutionStatus
 from execledger.store import ClaimedExecution, ExecutionStore, LostLease
 from execledger.workspace import WorkspaceManager
@@ -25,7 +25,7 @@ class ExecutionRunner:
         lease_seconds: float = 5.0,
         heartbeat_interval: float | None = None,
         worker_id: str | None = None,
-        backend: SubprocessBackend | None = None,
+        backend: ExecutionBackend | None = None,
     ):
         if workers < 1:
             raise ValueError("workers must be positive")
