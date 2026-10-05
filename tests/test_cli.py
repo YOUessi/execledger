@@ -58,3 +58,18 @@ def test_cli_snapshot_diff_and_restore_parsers():
     assert restore_args.command == "restore"
     assert restore_args.execution_id == "execution-1"
     assert restore_args.snapshot_id == "snapshot-1"
+
+
+def test_cli_gc_parser_defaults_to_dry_run():
+    args = build_parser().parse_args(["gc"])
+    assert args.command == "gc"
+    assert args.apply is False
+    assert args.restore_older_than_seconds is None
+
+
+def test_cli_gc_parser_accepts_apply_and_restore_retention():
+    args = build_parser().parse_args(
+        ["gc", "--apply", "--restore-older-than-seconds", "3600"]
+    )
+    assert args.apply is True
+    assert args.restore_older_than_seconds == 3600
