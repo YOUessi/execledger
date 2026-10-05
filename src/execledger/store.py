@@ -19,7 +19,7 @@ from execledger.models import (
     utc_now,
 )
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class IdempotencyConflict(ValueError):
@@ -99,7 +99,8 @@ class ExecutionStore:
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
                 worker_id TEXT,
                 lease_token TEXT,
-                lease_expires_at TEXT
+                lease_expires_at TEXT,
+                next_attempt_at TEXT
             );
             CREATE TABLE idempotency (
                 key TEXT PRIMARY KEY,
@@ -139,7 +140,7 @@ class ExecutionStore:
             );
             CREATE INDEX idx_attempts_execution
               ON attempts(execution_id, number);
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             """
         )
 
@@ -181,6 +182,20 @@ class ExecutionStore:
             self._conn.execute("ROLLBACK")
             raise
 
+    def _migrate_v2_to_v3(self) -> None:
+        columns = self._column_names("executions")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "next_attempt_at" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE executions ADD COLUMN next_attempt_at TEXT"
+                )
+            self._conn.execute("PRAGMA user_version = 3")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -194,8 +209,11 @@ class ExecutionStore:
             if not self._table_exists("executions"):
                 self._create_current_schema()
                 return
-            if version < CURRENT_SCHEMA_VERSION:
+            if version < 2:
                 self._migrate_v1_to_v2()
+                version = 2
+            if version < 3:
+                self._migrate_v2_to_v3()
 
     @property
     def schema_version(self) -> int:
@@ -273,6 +291,7 @@ class ExecutionStore:
             cancel_requested=bool(row["cancel_requested"]),
             worker_id=row["worker_id"],
             lease_expires_at=row["lease_expires_at"],
+            next_attempt_at=row["next_attempt_at"],
         )
 
     def get(self, execution_id: str) -> ExecutionRecord:
