@@ -276,7 +276,9 @@ class ExecutionStore:
             )
             attempts_total = int(self._conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0])
             effects_total = int(self._conn.execute("SELECT COUNT(*) FROM effects").fetchone()[0])
-            snapshots_total = int(self._conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
+            snapshots_total = int(
+                self._conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+            )
             idempotency_keys = int(
                 self._conn.execute("SELECT COUNT(*) FROM idempotency").fetchone()[0]
             )
