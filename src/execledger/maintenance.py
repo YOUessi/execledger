@@ -16,11 +16,13 @@ class StorageMaintenance:
         store: ExecutionStore,
         blobs: BlobStore,
         restore_root: Path,
+        workspace_root: Path,
         lock_path: Path,
     ):
         self.store = store
         self.blobs = blobs
         self.restore_root = restore_root.resolve()
+        self.workspace_root = workspace_root.resolve()
         self.restore_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.lock_path = lock_path
 
@@ -39,10 +41,13 @@ class StorageMaintenance:
         *,
         dry_run: bool = True,
         restore_older_than_seconds: float | None = None,
+        workspace_older_than_seconds: float | None = None,
         now: datetime | None = None,
     ) -> GarbageCollectionReport:
         if restore_older_than_seconds is not None and restore_older_than_seconds < 0:
             raise ValueError("restore_older_than_seconds must be non-negative")
+        if workspace_older_than_seconds is not None and workspace_older_than_seconds < 0:
+            raise ValueError("workspace_older_than_seconds must be non-negative")
 
         now_dt = now or utc_now()
         now_timestamp = now_dt.timestamp()
@@ -91,6 +96,36 @@ class StorageMaintenance:
                     deleted_restore_names.append(path.name)
                     restore_bytes_reclaimed += size
 
+            workspace_dirs: list[Path] = []
+            if self.workspace_root.exists():
+                workspace_dirs = sorted(
+                    path
+                    for path in self.workspace_root.iterdir()
+                    if path.is_dir() and not path.is_symlink()
+                )
+
+            eligible_workspaces: list[tuple[Path, int]] = []
+            if workspace_older_than_seconds is not None:
+                cutoff = now_dt.timestamp() - workspace_older_than_seconds
+                cutoff_dt = datetime.fromtimestamp(
+                    cutoff,
+                    tz=now_dt.tzinfo,
+                )
+                eligible_ids = self.store.workspace_retention_candidates(cutoff_dt)
+                for path in workspace_dirs:
+                    if path.name in eligible_ids:
+                        eligible_workspaces.append(
+                            (path, self._directory_size(path))
+                        )
+
+            deleted_workspace_names: list[str] = []
+            workspace_bytes_reclaimed = 0
+            if not dry_run:
+                for path, size in eligible_workspaces:
+                    shutil.rmtree(path)
+                    deleted_workspace_names.append(path.name)
+                    workspace_bytes_reclaimed += size
+
             return GarbageCollectionReport(
                 dry_run=dry_run,
                 snapshots_scanned=snapshot_count,
@@ -107,4 +142,13 @@ class StorageMaintenance:
                     size for _, size in eligible_restores
                 ),
                 restore_bytes_reclaimed=restore_bytes_reclaimed,
+                workspaces_scanned=len(workspace_dirs),
+                workspace_dirs_eligible=[
+                    path.name for path, _ in eligible_workspaces
+                ],
+                workspace_dirs_deleted=deleted_workspace_names,
+                workspace_bytes_reclaimable=sum(
+                    size for _, size in eligible_workspaces
+                ),
+                workspace_bytes_reclaimed=workspace_bytes_reclaimed,
             )
