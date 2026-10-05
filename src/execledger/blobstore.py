@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -19,6 +20,14 @@ class BlobNotFound(BlobStoreError):
 
 class BlobCorruption(BlobStoreError):
     pass
+
+
+@dataclass(frozen=True)
+class BlobInfo:
+    digest: str
+    path: Path
+    size: int
+    mtime_ns: int
 
 
 class BlobStore:
@@ -83,3 +92,43 @@ class BlobStore:
         except BlobNotFound:
             return False
         return True
+
+
+    def inventory(self) -> list[BlobInfo]:
+        items: list[BlobInfo] = []
+        for path in sorted(self.root.rglob("*")):
+            if path.is_symlink():
+                continue
+            if not path.is_file():
+                continue
+            digest = path.name
+            if not _DIGEST.fullmatch(digest):
+                continue
+            if path.parent.name != digest[:2]:
+                continue
+            stat = path.stat()
+            items.append(
+                BlobInfo(
+                    digest=digest,
+                    path=path,
+                    size=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                )
+            )
+        return items
+
+    def delete(self, digest: str) -> int:
+        target = self.path_for(digest)
+        if target.is_symlink():
+            raise BlobCorruption(f"blob path is a symlink: {digest}")
+        if not target.exists():
+            return 0
+        if not target.is_file():
+            raise BlobCorruption(f"blob path is not a regular file: {digest}")
+        size = target.stat().st_size
+        target.unlink()
+        try:
+            target.parent.rmdir()
+        except OSError:
+            pass
+        return size
