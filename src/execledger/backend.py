@@ -71,13 +71,13 @@ class SubprocessBackend:
         result_path = result_dir / f"attempt-{attempt_number}-{uuid.uuid4().hex}.json"
 
         launch_env = dict(env)
-        launch_env["EXECLEDGER_RESOURCE_LIMITS"] = json.dumps(
-            spec.resource_limits.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-        )
 
         if os.name == "posix":
+            launch_env["EXECLEDGER_RESOURCE_LIMITS"] = json.dumps(
+                spec.resource_limits.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             argv = [
                 sys.executable,
                 "-m",
@@ -101,6 +101,10 @@ class SubprocessBackend:
 
     def collect_result(self, spawned: SpawnedProcess) -> BackendResult:
         if not spawned.result_path.exists():
+            try:
+                spawned.result_path.parent.rmdir()
+            except OSError:
+                pass
             return BackendResult(
                 exit_code=spawned.process.returncode,
                 resource_usage=None,
