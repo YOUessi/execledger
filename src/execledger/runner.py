@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
+from execledger.backend import SpawnedProcess, SubprocessBackend
 from execledger.models import ExecutionRecord, ExecutionStatus
 from execledger.store import ClaimedExecution, ExecutionStore, LostLease
 from execledger.workspace import WorkspaceManager
@@ -24,6 +25,7 @@ class ExecutionRunner:
         lease_seconds: float = 5.0,
         heartbeat_interval: float | None = None,
         worker_id: str | None = None,
+        backend: SubprocessBackend | None = None,
     ):
         if workers < 1:
             raise ValueError("workers must be positive")
@@ -35,6 +37,9 @@ class ExecutionRunner:
 
         self.store = store
         self.workspaces = workspaces
+        self.backend = backend or SubprocessBackend(
+            self.workspaces.root.parent / "runtime"
+        )
         self.workers = workers
         self.poll_interval = poll_interval
         self.lease_seconds = lease_seconds
@@ -84,6 +89,8 @@ class ExecutionRunner:
             "stopping": self._stopping.is_set(),
             "lease_seconds": self.lease_seconds,
             "heartbeat_interval": self.heartbeat_interval,
+            "backend": self.backend.name,
+            "resource_limits_supported": self.backend.supports_resource_limits,
         }
 
     async def cancel(self, execution_id: str) -> ExecutionRecord:
@@ -266,6 +273,7 @@ class ExecutionRunner:
         lease_lost = asyncio.Event()
         timed_out = False
         process: asyncio.subprocess.Process | None = None
+        spawned: SpawnedProcess | None = None
 
         try:
             if not self.store.renew_lease(
@@ -289,14 +297,14 @@ class ExecutionRunner:
                 {"argv": spec.argv, "cwd": str(Path(execution_id))},
             )
 
-            process = await asyncio.create_subprocess_exec(
-                *spec.argv,
+            spawned = await self.backend.spawn(
+                execution_id,
+                record.attempt,
+                spec,
                 cwd=workspace,
                 env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name == "posix",
             )
+            process = spawned.process
             self._processes[execution_id] = process
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("subprocess pipes were not created")
@@ -372,6 +380,22 @@ class ExecutionRunner:
             ):
                 return
 
+            backend_result = (
+                self.backend.collect_result(spawned)
+                if spawned is not None
+                else None
+            )
+            target_exit_code = (
+                backend_result.exit_code
+                if backend_result is not None
+                else process.returncode
+            )
+            resource_usage = (
+                backend_result.resource_usage
+                if backend_result is not None
+                else None
+            )
+
             stdout = stdout_buffer.decode("utf-8", errors="replace")
             stderr = stderr_buffer.decode("utf-8", errors="replace")
             self.store.add_effect(
@@ -394,15 +418,18 @@ class ExecutionRunner:
                 status = ExecutionStatus.TIMED_OUT
             else:
                 status = (
-                    ExecutionStatus.SUCCEEDED if process.returncode == 0 else ExecutionStatus.FAILED
+                    ExecutionStatus.SUCCEEDED
+                    if target_exit_code == 0
+                    else ExecutionStatus.FAILED
                 )
             self.store.finish(
                 execution_id,
                 status,
-                exit_code=process.returncode,
+                exit_code=target_exit_code,
                 stdout=stdout,
                 stderr=stderr,
                 lease_token=lease_token,
+                usage=resource_usage,
             )
         except LostLease:
             if process is not None:
