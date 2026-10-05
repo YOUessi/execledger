@@ -56,7 +56,7 @@ def create_app(
             await service.stop()
             service.store.close()
 
-    app = FastAPI(title="ExecLedger", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="ExecLedger", version="0.8.0", lifespan=lifespan)
     app.state.service = service
 
     @app.get("/", include_in_schema=False)
