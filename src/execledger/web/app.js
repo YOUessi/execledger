@@ -352,6 +352,7 @@ function connectStream() {
     "execution_submitted", "workspace_prepared", "execution_claimed", "worker_assigned",
     "process_starting", "output_chunk", "output_captured", "snapshot_created",
     "snapshot_restored", "cancel_requested", "execution_finished", "lease_expired",
+    "retry_scheduled",
     "shutdown_interruption_requested", "shutdown_before_launch", "output_drain_incomplete",
   ];
 
@@ -426,6 +427,74 @@ async function submitJob() {
   }
 }
 
+function gcRestoreAge() {
+  const raw = $("gc-restore-age").value.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Restore retention age must be a non-negative number.");
+  }
+  return value;
+}
+
+function renderGcReport(report) {
+  const lines = [
+    report.dry_run ? "DRY RUN" : "APPLIED",
+    `snapshots scanned: ${report.snapshots_scanned}`,
+    `blobs scanned: ${report.blobs_scanned}`,
+    `referenced blobs: ${report.referenced_blobs}`,
+    `orphan blobs: ${report.orphan_blobs.length}`,
+    `blob bytes reclaimable: ${report.bytes_reclaimable}`,
+    `blob bytes reclaimed: ${report.bytes_reclaimed}`,
+    `restores scanned: ${report.restores_scanned}`,
+    `restore dirs eligible: ${report.restore_dirs_eligible.length}`,
+    `restore dirs deleted: ${report.restore_dirs_deleted.length}`,
+    `restore bytes reclaimable: ${report.restore_bytes_reclaimable}`,
+    `restore bytes reclaimed: ${report.restore_bytes_reclaimed}`,
+  ];
+  $("gc-report").textContent = lines.join("\n");
+}
+
+async function runStorageGc(apply) {
+  let restoreAge;
+  try {
+    restoreAge = gcRestoreAge();
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+
+  if (apply) {
+    const confirmed = confirm(
+      "Apply storage GC? Unreferenced blobs and eligible restored copies will be deleted."
+    );
+    if (!confirmed) return;
+  }
+
+  const params = new URLSearchParams({apply: String(apply)});
+  if (restoreAge !== null) {
+    params.set("restore_older_than_seconds", String(restoreAge));
+  }
+
+  $("gc-status").textContent = apply ? "applying…" : "scanning…";
+  try {
+    const report = await api(
+      `/v1/maintenance/gc?${params}`,
+      {method: "POST"}
+    );
+    renderGcReport(report);
+    $("gc-status").textContent = report.dry_run ? "dry-run complete" : "GC complete";
+    if (!report.dry_run) {
+      toast(
+        `GC reclaimed ${report.bytes_reclaimed + report.restore_bytes_reclaimed} bytes.`
+      );
+    }
+  } catch (error) {
+    $("gc-status").textContent = "failed";
+    toast(`Storage GC failed: ${error.message}`);
+  }
+}
+
 async function cancelSelected() {
   if (!state.selectedId) return;
   if (!confirm("Request cancellation for this execution?")) return;
@@ -459,6 +528,8 @@ function loadExample() {
 function bindEvents() {
   $("load-example").addEventListener("click", loadExample);
   $("submit-job").addEventListener("click", submitJob);
+  $("gc-scan").addEventListener("click", () => runStorageGc(false));
+  $("gc-apply").addEventListener("click", () => runStorageGc(true));
   $("refresh-list").addEventListener("click", refreshExecutions);
   $("cancel-job").addEventListener("click", cancelSelected);
   $("refresh-effects").addEventListener("click", refreshEffects);
