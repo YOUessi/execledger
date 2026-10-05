@@ -275,6 +275,7 @@ def test_failed_attempt_requeues_until_retry_budget_is_exhausted(tmp_path: Path)
     assert queued.attempt == 1
     assert queued.next_attempt_at == base + timedelta(seconds=6)
     assert queued.stderr == "first failure"
+    assert queued.exit_code is None
 
     assert (
         store.claim_next(
@@ -396,6 +397,7 @@ def test_cancelled_backoff_does_not_run_again(tmp_path: Path):
     cancelled = store.request_cancel(record.id)
     assert cancelled.status == ExecutionStatus.CANCELLED
     assert cancelled.next_attempt_at is None
+    assert store.effects(record.id)[-1].kind == "execution_finished"
     assert store.claim_next(
         "worker-b",
         lease_seconds=60,
