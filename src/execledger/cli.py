@@ -47,6 +47,19 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check-spec", help="Validate an execution spec JSON file")
     check.add_argument("path", type=Path)
 
+    gc = sub.add_parser("gc", help="Garbage-collect unreferenced storage")
+    _add_url(gc)
+    gc.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete eligible data. Default is dry-run.",
+    )
+    gc.add_argument(
+        "--restore-older-than-seconds",
+        type=float,
+        help="Also remove restored copies at least this old.",
+    )
+
     submit = sub.add_parser("submit", help="Submit an execution spec")
     _add_url(submit)
     submit.add_argument("path", type=Path)
@@ -157,6 +170,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     client = ExecLedgerClient(args.url)
+
+    if args.command == "gc":
+        _json(
+            client.gc(
+                apply=args.apply,
+                restore_older_than_seconds=args.restore_older_than_seconds,
+            )
+        )
+        return 0
 
     if args.command == "submit":
         spec = ExecutionSpec.model_validate_json(args.path.read_text())
