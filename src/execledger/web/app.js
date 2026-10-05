@@ -33,6 +33,20 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let current = bytes / 1024;
+  let index = 0;
+  while (current >= 1024 && index < units.length - 1) {
+    current /= 1024;
+    index += 1;
+  }
+  return `${current.toFixed(current >= 10 ? 1 : 2)} ${units[index]}`;
+}
+
 function badge(status) {
   return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status)}</span>`;
 }
@@ -77,6 +91,21 @@ async function refreshHealth() {
   } catch (error) {
     $("health-dot").className = "dot bad";
     $("health-text").textContent = "API unavailable";
+  }
+}
+
+async function refreshDiagnostics() {
+  try {
+    const report = await api("/v1/diagnostics");
+    $("diag-queue-ready").textContent = report.queue_ready;
+    $("diag-queue-delayed").textContent = report.queue_delayed;
+    $("diag-active-processes").textContent = report.active_processes;
+    $("diag-expired-leases").textContent = report.expired_leases;
+    $("diag-blob-bytes").textContent = formatBytes(report.blob_bytes);
+    $("diag-workspace-bytes").textContent = formatBytes(report.workspace_bytes);
+    $("diag-schema").textContent = `schema v${report.schema_version}`;
+  } catch (error) {
+    $("diag-schema").textContent = "diagnostics unavailable";
   }
 }
 
@@ -437,6 +466,16 @@ function gcRestoreAge() {
   return value;
 }
 
+function gcWorkspaceAge() {
+  const raw = $("gc-workspace-age").value.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Workspace retention age must be a non-negative number.");
+  }
+  return value;
+}
+
 function renderGcReport(report) {
   const lines = [
     report.dry_run ? "DRY RUN" : "APPLIED",
@@ -451,14 +490,21 @@ function renderGcReport(report) {
     `restore dirs deleted: ${report.restore_dirs_deleted.length}`,
     `restore bytes reclaimable: ${report.restore_bytes_reclaimable}`,
     `restore bytes reclaimed: ${report.restore_bytes_reclaimed}`,
+    `workspaces scanned: ${report.workspaces_scanned}`,
+    `workspace dirs eligible: ${report.workspace_dirs_eligible.length}`,
+    `workspace dirs deleted: ${report.workspace_dirs_deleted.length}`,
+    `workspace bytes reclaimable: ${report.workspace_bytes_reclaimable}`,
+    `workspace bytes reclaimed: ${report.workspace_bytes_reclaimed}`,
   ];
   $("gc-report").textContent = lines.join("\n");
 }
 
 async function runStorageGc(apply) {
   let restoreAge;
+  let workspaceAge;
   try {
     restoreAge = gcRestoreAge();
+    workspaceAge = gcWorkspaceAge();
   } catch (error) {
     toast(error.message);
     return;
@@ -466,7 +512,7 @@ async function runStorageGc(apply) {
 
   if (apply) {
     const confirmed = confirm(
-      "Apply storage GC? Unreferenced blobs and eligible restored copies will be deleted."
+      "Apply storage GC? Unreferenced blobs and eligible restore/workspace directories will be deleted."
     );
     if (!confirmed) return;
   }
@@ -474,6 +520,9 @@ async function runStorageGc(apply) {
   const params = new URLSearchParams({apply: String(apply)});
   if (restoreAge !== null) {
     params.set("restore_older_than_seconds", String(restoreAge));
+  }
+  if (workspaceAge !== null) {
+    params.set("workspace_older_than_seconds", String(workspaceAge));
   }
 
   $("gc-status").textContent = apply ? "applying…" : "scanning…";
@@ -486,7 +535,11 @@ async function runStorageGc(apply) {
     $("gc-status").textContent = report.dry_run ? "dry-run complete" : "GC complete";
     if (!report.dry_run) {
       toast(
-        `GC reclaimed ${report.bytes_reclaimed + report.restore_bytes_reclaimed} bytes.`
+        `GC reclaimed ${
+          report.bytes_reclaimed
+          + report.restore_bytes_reclaimed
+          + report.workspace_bytes_reclaimed
+        } bytes.`
       );
     }
   } catch (error) {
@@ -527,6 +580,7 @@ function loadExample() {
 
 function bindEvents() {
   $("load-example").addEventListener("click", loadExample);
+  $("refresh-diagnostics").addEventListener("click", refreshDiagnostics);
   $("submit-job").addEventListener("click", submitJob);
   $("gc-scan").addEventListener("click", () => runStorageGc(false));
   $("gc-apply").addEventListener("click", () => runStorageGc(true));
@@ -550,8 +604,9 @@ function bindEvents() {
 async function boot() {
   bindEvents();
   loadExample();
-  await Promise.all([refreshHealth(), refreshExecutions()]);
+  await Promise.all([refreshHealth(), refreshDiagnostics(), refreshExecutions()]);
   setInterval(refreshHealth, 10000);
+  setInterval(refreshDiagnostics, 5000);
   setInterval(async () => {
     await refreshExecutions();
     if (state.selectedId) await refreshSelected();
