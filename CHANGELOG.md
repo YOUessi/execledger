@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+- Added opt-in automatic retry policy with bounded attempt counts.
+- Added configurable retry outcomes for failed, timed-out and interrupted attempts.
+- Added exponential backoff with a configurable upper bound.
+- Persisted `next_attempt_at` so retry delays survive service restarts.
+- Routed expired worker leases through the same retry policy.
+- Preserved every attempt outcome while allowing the logical execution to continue.
+- Kept cancellation terminal and able to cancel work waiting in backoff.
+- Preserved legacy idempotency semantics when old request hashes lack the new retry-policy defaults.
+- Added schema migration to version 3 and deterministic retry/backoff tests.
+- Added end-to-end retry coverage through the real worker runner.
+
 ## 0.5.0
 
 - Added a built-in same-origin operator Web console at `/ui/`.

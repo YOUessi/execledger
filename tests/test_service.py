@@ -312,3 +312,58 @@ async def test_cancel_from_non_owner_service_is_observed_by_lease_heartbeat(tmp_
         await asyncio.gather(service_a.stop(), service_b.stop())
         service_a.store.close()
         service_b.store.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_reexecutes_failed_attempt_and_preserves_history(tmp_path: Path):
+    service = ExecutionService(
+        tmp_path,
+        workers=1,
+        lease_seconds=1.0,
+        heartbeat_interval=0.1,
+        worker_id="retry-service",
+    )
+    await service.start()
+    try:
+        program = (
+            "import sys; "
+            "from pathlib import Path; "
+            "marker = Path('attempt-marker'); "
+            "\nif not marker.exists():"
+            "\n    marker.write_text('first')"
+            "\n    print('first attempt failed', file=sys.stderr)"
+            "\n    raise SystemExit(7)"
+            "\nprint('second attempt succeeded')"
+        )
+        result = await service.submit(
+            ExecutionSpec(
+                argv=[sys.executable, "-c", program],
+                retry_policy={
+                    "max_attempts": 2,
+                    "retry_on": ["FAILED"],
+                    "backoff_initial_seconds": 0.01,
+                    "backoff_multiplier": 2,
+                    "backoff_max_seconds": 1,
+                },
+            ),
+            "service-retry-key",
+        )
+
+        final = await service.wait_terminal(result.execution.id, timeout=5)
+        assert final.status == ExecutionStatus.SUCCEEDED
+        assert final.attempt == 2
+        assert final.stdout.strip() == "second attempt succeeded"
+
+        attempts = service.store.attempts(final.id)
+        assert [attempt.status for attempt in attempts] == [
+            ExecutionStatus.FAILED,
+            ExecutionStatus.SUCCEEDED,
+        ]
+        assert [attempt.exit_code for attempt in attempts] == [7, 0]
+
+        effects = service.store.effects(final.id)
+        assert any(effect.kind == "retry_scheduled" for effect in effects)
+        assert effects[-1].kind == "execution_finished"
+    finally:
+        await service.stop()
+        service.store.close()

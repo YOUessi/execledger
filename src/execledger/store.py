@@ -19,7 +19,7 @@ from execledger.models import (
     utc_now,
 )
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class IdempotencyConflict(ValueError):
@@ -99,7 +99,8 @@ class ExecutionStore:
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
                 worker_id TEXT,
                 lease_token TEXT,
-                lease_expires_at TEXT
+                lease_expires_at TEXT,
+                next_attempt_at TEXT
             );
             CREATE TABLE idempotency (
                 key TEXT PRIMARY KEY,
@@ -139,7 +140,7 @@ class ExecutionStore:
             );
             CREATE INDEX idx_attempts_execution
               ON attempts(execution_id, number);
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             """
         )
 
@@ -181,6 +182,20 @@ class ExecutionStore:
             self._conn.execute("ROLLBACK")
             raise
 
+    def _migrate_v2_to_v3(self) -> None:
+        columns = self._column_names("executions")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "next_attempt_at" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE executions ADD COLUMN next_attempt_at TEXT"
+                )
+            self._conn.execute("PRAGMA user_version = 3")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -194,8 +209,11 @@ class ExecutionStore:
             if not self._table_exists("executions"):
                 self._create_current_schema()
                 return
-            if version < CURRENT_SCHEMA_VERSION:
+            if version < 2:
                 self._migrate_v1_to_v2()
+                version = 2
+            if version < 3:
+                self._migrate_v2_to_v3()
 
     @property
     def schema_version(self) -> int:
@@ -228,7 +246,25 @@ class ExecutionStore:
                 ).fetchone()
                 if existing is not None:
                     if existing["request_hash"] != request_hash:
-                        raise IdempotencyConflict("idempotency key reused with a different request")
+                        prior = self._conn.execute(
+                            "SELECT spec_json FROM executions WHERE id = ?",
+                            (existing["execution_id"],),
+                        ).fetchone()
+                        if prior is None:
+                            raise RuntimeError("idempotency mapping references missing execution")
+                        prior_spec = ExecutionSpec.model_validate_json(prior["spec_json"])
+                        if prior_spec.model_dump(mode="json") != spec.model_dump(mode="json"):
+                            raise IdempotencyConflict(
+                                "idempotency key reused with a different request"
+                            )
+                        self._conn.execute(
+                            "UPDATE idempotency SET request_hash = ? WHERE key = ?",
+                            (request_hash, idempotency_key),
+                        )
+                        self._conn.execute(
+                            "UPDATE executions SET request_hash = ? WHERE id = ?",
+                            (request_hash, existing["execution_id"]),
+                        )
                     self._conn.execute("COMMIT")
                     return self.get(existing["execution_id"]), False
                 self._conn.execute(
@@ -273,6 +309,7 @@ class ExecutionStore:
             cancel_requested=bool(row["cancel_requested"]),
             worker_id=row["worker_id"],
             lease_expires_at=row["lease_expires_at"],
+            next_attempt_at=row["next_attempt_at"],
         )
 
     def get(self, execution_id: str) -> ExecutionRecord:
@@ -297,14 +334,15 @@ class ExecutionStore:
         worker_id: str,
         *,
         lease_seconds: float = 5.0,
+        now: datetime | None = None,
     ) -> ClaimedExecution | None:
         if not worker_id:
             raise ValueError("worker_id must be non-empty")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
 
-        now_dt = utc_now()
-        now = now_dt.isoformat()
+        now_dt = now or utc_now()
+        now_text = now_dt.isoformat()
         expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
         lease_token = uuid.uuid4().hex
         attempt_id = uuid.uuid4().hex
@@ -316,9 +354,10 @@ class ExecutionStore:
                     """
                     SELECT id, attempt FROM executions
                     WHERE status = ? AND cancel_requested = 0
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                     ORDER BY created_at ASC LIMIT 1
                     """,
-                    (ExecutionStatus.QUEUED.value,),
+                    (ExecutionStatus.QUEUED.value, now_text),
                 ).fetchone()
                 if row is None:
                     self._conn.execute("COMMIT")
@@ -331,13 +370,14 @@ class ExecutionStore:
                     UPDATE executions
                     SET status = ?, started_at = COALESCE(started_at, ?),
                         updated_at = ?, attempt = ?, worker_id = ?,
-                        lease_token = ?, lease_expires_at = ?
+                        lease_token = ?, lease_expires_at = ?,
+                        next_attempt_at = NULL
                     WHERE id = ? AND status = ?
                     """,
                     (
                         ExecutionStatus.RUNNING.value,
-                        now,
-                        now,
+                        now_text,
+                        now_text,
                         attempt_number,
                         worker_id,
                         lease_token,
@@ -363,7 +403,7 @@ class ExecutionStore:
                         worker_id,
                         lease_token,
                         ExecutionStatus.RUNNING.value,
-                        now,
+                        now_text,
                     ),
                 )
                 self._conn.execute("COMMIT")
@@ -433,7 +473,8 @@ class ExecutionStore:
                 self._conn.execute(
                     """
                     UPDATE executions SET cancel_requested = 1, status = ?, updated_at = ?,
-                      finished_at = ? WHERE id = ? AND status = ?
+                      finished_at = ?, next_attempt_at = NULL
+                    WHERE id = ? AND status = ?
                     """,
                     (
                         ExecutionStatus.CANCELLED.value,
@@ -449,7 +490,33 @@ class ExecutionStore:
                     (now, execution_id),
                 )
         self.add_effect(execution_id, "cancel_requested", {})
-        return self.get(execution_id)
+        result = self.get(execution_id)
+        if current.status == ExecutionStatus.QUEUED:
+            self.add_effect(
+                execution_id,
+                "execution_finished",
+                {"status": ExecutionStatus.CANCELLED.value, "exit_code": None},
+            )
+        return result
+
+    @staticmethod
+    def _retry_plan(
+        spec: ExecutionSpec,
+        outcome: ExecutionStatus,
+        attempt_number: int,
+        cancel_requested: bool,
+        now: datetime,
+    ) -> tuple[str, float] | None:
+        policy = spec.retry_policy
+        if cancel_requested:
+            return None
+        if outcome not in policy.retry_on:
+            return None
+        if attempt_number >= policy.max_attempts:
+            return None
+        delay = policy.delay_after_attempt(attempt_number)
+        next_attempt_at = (now + timedelta(seconds=delay)).isoformat()
+        return next_attempt_at, delay
 
     def finish(
         self,
@@ -460,15 +527,19 @@ class ExecutionStore:
         stdout: str,
         stderr: str,
         lease_token: str | None = None,
+        now: datetime | None = None,
     ) -> ExecutionRecord:
-        now_dt = utc_now()
-        now = now_dt.isoformat()
+        now_dt = now or utc_now()
+        now_text = now_dt.isoformat()
+        retry_payload: dict[str, object] | None = None
+
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
                     """
-                    SELECT status, attempt, lease_token, lease_expires_at
+                    SELECT status, attempt, lease_token, lease_expires_at,
+                           spec_json, cancel_requested
                     FROM executions WHERE id = ?
                     """,
                     (execution_id,),
@@ -485,20 +556,20 @@ class ExecutionStore:
                 if current_status == ExecutionStatus.RUNNING and current_token is not None:
                     if lease_token != current_token:
                         raise LostLease(execution_id)
-                    if expires is not None and expires <= now:
+                    if expires is not None and expires <= now_text:
                         raise LostLease(execution_id)
 
-                self._conn.execute(
-                    """
-                    UPDATE executions
-                    SET status = ?, updated_at = ?, finished_at = ?,
-                        exit_code = ?, stdout = ?, stderr = ?,
-                        worker_id = NULL, lease_token = NULL, lease_expires_at = NULL
-                    WHERE id = ?
-                    """,
-                    (status.value, now, now, exit_code, stdout, stderr, execution_id),
+                attempt_number = int(row["attempt"])
+                spec = ExecutionSpec.model_validate_json(row["spec_json"])
+                retry = self._retry_plan(
+                    spec,
+                    status,
+                    attempt_number,
+                    bool(row["cancel_requested"]),
+                    now_dt,
                 )
-                if int(row["attempt"]) > 0:
+
+                if attempt_number > 0:
                     self._conn.execute(
                         """
                         UPDATE attempts
@@ -507,61 +578,109 @@ class ExecutionStore:
                         """,
                         (
                             status.value,
-                            now,
+                            now_text,
                             exit_code,
                             execution_id,
-                            int(row["attempt"]),
+                            attempt_number,
                         ),
                     )
+
+                if retry is not None:
+                    next_attempt_at, delay = retry
+                    self._conn.execute(
+                        """
+                        UPDATE executions
+                        SET status = ?, updated_at = ?, finished_at = NULL,
+                            exit_code = NULL, stdout = ?, stderr = ?,
+                            worker_id = NULL, lease_token = NULL,
+                            lease_expires_at = NULL, next_attempt_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            ExecutionStatus.QUEUED.value,
+                            now_text,
+                            stdout,
+                            stderr,
+                            next_attempt_at,
+                            execution_id,
+                        ),
+                    )
+                    retry_payload = {
+                        "attempt": attempt_number,
+                        "outcome": status.value,
+                        "next_attempt": attempt_number + 1,
+                        "next_attempt_at": next_attempt_at,
+                        "delay_seconds": delay,
+                    }
+                else:
+                    self._conn.execute(
+                        """
+                        UPDATE executions
+                        SET status = ?, updated_at = ?, finished_at = ?,
+                            exit_code = ?, stdout = ?, stderr = ?,
+                            worker_id = NULL, lease_token = NULL,
+                            lease_expires_at = NULL, next_attempt_at = NULL
+                        WHERE id = ?
+                        """,
+                        (
+                            status.value,
+                            now_text,
+                            now_text,
+                            exit_code,
+                            stdout,
+                            stderr,
+                            execution_id,
+                        ),
+                    )
+
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
 
-        self.add_effect(
-            execution_id,
-            "execution_finished",
-            {"status": status.value, "exit_code": exit_code},
-        )
+        if retry_payload is not None:
+            self.add_effect(execution_id, "retry_scheduled", retry_payload)
+        else:
+            self.add_effect(
+                execution_id,
+                "execution_finished",
+                {"status": status.value, "exit_code": exit_code},
+            )
         return self.get(execution_id)
 
     def expire_leases(self, now: datetime | None = None) -> list[str]:
         now_dt = now or utc_now()
         now_text = now_dt.isoformat()
-        expired: list[tuple[str, str | None, int]] = []
+        expired: list[
+            tuple[str, str | None, int, dict[str, object] | None]
+        ] = []
 
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 rows = self._conn.execute(
                     """
-                    SELECT id, worker_id, attempt FROM executions
+                    SELECT id, worker_id, attempt, spec_json, cancel_requested
+                    FROM executions
                     WHERE status = ?
                       AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
                     """,
                     (ExecutionStatus.RUNNING.value, now_text),
                 ).fetchall()
+
                 for row in rows:
                     execution_id = row["id"]
-                    expired.append(
-                        (execution_id, row["worker_id"], int(row["attempt"]))
+                    attempt_number = int(row["attempt"])
+                    spec = ExecutionSpec.model_validate_json(row["spec_json"])
+                    retry = self._retry_plan(
+                        spec,
+                        ExecutionStatus.INTERRUPTED,
+                        attempt_number,
+                        bool(row["cancel_requested"]),
+                        now_dt,
                     )
-                    self._conn.execute(
-                        """
-                        UPDATE executions
-                        SET status = ?, updated_at = ?, finished_at = ?,
-                            worker_id = NULL, lease_token = NULL, lease_expires_at = NULL
-                        WHERE id = ? AND status = ?
-                        """,
-                        (
-                            ExecutionStatus.INTERRUPTED.value,
-                            now_text,
-                            now_text,
-                            execution_id,
-                            ExecutionStatus.RUNNING.value,
-                        ),
-                    )
-                    if int(row["attempt"]) > 0:
+
+                    if attempt_number > 0:
                         self._conn.execute(
                             """
                             UPDATE attempts
@@ -572,16 +691,69 @@ class ExecutionStore:
                                 ExecutionStatus.INTERRUPTED.value,
                                 now_text,
                                 execution_id,
-                                int(row["attempt"]),
+                                attempt_number,
                                 ExecutionStatus.RUNNING.value,
                             ),
                         )
+
+                    retry_payload: dict[str, object] | None = None
+                    if retry is not None:
+                        next_attempt_at, delay = retry
+                        self._conn.execute(
+                            """
+                            UPDATE executions
+                            SET status = ?, updated_at = ?, finished_at = NULL,
+                                worker_id = NULL, lease_token = NULL,
+                                lease_expires_at = NULL, next_attempt_at = ?
+                            WHERE id = ? AND status = ?
+                            """,
+                            (
+                                ExecutionStatus.QUEUED.value,
+                                now_text,
+                                next_attempt_at,
+                                execution_id,
+                                ExecutionStatus.RUNNING.value,
+                            ),
+                        )
+                        retry_payload = {
+                            "attempt": attempt_number,
+                            "outcome": ExecutionStatus.INTERRUPTED.value,
+                            "next_attempt": attempt_number + 1,
+                            "next_attempt_at": next_attempt_at,
+                            "delay_seconds": delay,
+                        }
+                    else:
+                        self._conn.execute(
+                            """
+                            UPDATE executions
+                            SET status = ?, updated_at = ?, finished_at = ?,
+                                worker_id = NULL, lease_token = NULL,
+                                lease_expires_at = NULL, next_attempt_at = NULL
+                            WHERE id = ? AND status = ?
+                            """,
+                            (
+                                ExecutionStatus.INTERRUPTED.value,
+                                now_text,
+                                now_text,
+                                execution_id,
+                                ExecutionStatus.RUNNING.value,
+                            ),
+                        )
+
+                    expired.append(
+                        (
+                            execution_id,
+                            row["worker_id"],
+                            attempt_number,
+                            retry_payload,
+                        )
+                    )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
 
-        for execution_id, worker_id, attempt_number in expired:
+        for execution_id, worker_id, attempt_number, retry_payload in expired:
             self.add_effect(
                 execution_id,
                 "lease_expired",
@@ -590,7 +762,18 @@ class ExecutionStore:
                     "attempt": attempt_number,
                 },
             )
-        return [execution_id for execution_id, _, _ in expired]
+            if retry_payload is not None:
+                self.add_effect(execution_id, "retry_scheduled", retry_payload)
+            else:
+                self.add_effect(
+                    execution_id,
+                    "execution_finished",
+                    {
+                        "status": ExecutionStatus.INTERRUPTED.value,
+                        "exit_code": None,
+                    },
+                )
+        return [execution_id for execution_id, _, _, _ in expired]
 
     def attempts(self, execution_id: str) -> list[AttemptRecord]:
         self.get(execution_id)
