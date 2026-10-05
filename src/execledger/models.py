@@ -66,6 +66,41 @@ class RetryPolicy(BaseModel):
         return min(delay, self.backoff_max_seconds)
 
 
+class ResourceLimits(BaseModel):
+    max_cpu_seconds: Annotated[int | None, Field(ge=1, le=86400)] = None
+    max_memory_bytes: Annotated[
+        int | None,
+        Field(ge=16 * 1024 * 1024, le=512 * 1024 * 1024 * 1024),
+    ] = None
+    max_file_bytes: Annotated[
+        int | None,
+        Field(ge=1024, le=64 * 1024 * 1024 * 1024),
+    ] = None
+    max_open_files: Annotated[int | None, Field(ge=16, le=1_048_576)] = None
+    max_processes: Annotated[int | None, Field(ge=1, le=65_536)] = None
+
+    def configured(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.max_cpu_seconds,
+                self.max_memory_bytes,
+                self.max_file_bytes,
+                self.max_open_files,
+                self.max_processes,
+            )
+        )
+
+
+class ResourceUsage(BaseModel):
+    wall_time_seconds: float
+    user_cpu_seconds: float
+    system_cpu_seconds: float
+    max_rss_bytes: int
+    voluntary_context_switches: int = 0
+    involuntary_context_switches: int = 0
+
+
 class ExecutionSpec(BaseModel):
     argv: Annotated[list[str], Field(min_length=1, max_length=64)]
     env: dict[str, str] = Field(default_factory=dict)
@@ -73,6 +108,7 @@ class ExecutionSpec(BaseModel):
     timeout_seconds: Annotated[float, Field(gt=0, le=3600)] = 60.0
     max_output_bytes: Annotated[int, Field(ge=1024, le=4 * 1024 * 1024)] = 256 * 1024
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    resource_limits: ResourceLimits = Field(default_factory=ResourceLimits)
 
     @field_validator("argv")
     @classmethod
@@ -106,6 +142,7 @@ class ExecutionRecord(BaseModel):
     worker_id: str | None = None
     lease_expires_at: datetime | None = None
     next_attempt_at: datetime | None = None
+    resource_usage: ResourceUsage | None = None
 
 
 class AttemptRecord(BaseModel):
@@ -117,6 +154,7 @@ class AttemptRecord(BaseModel):
     started_at: datetime
     finished_at: datetime | None = None
     exit_code: int | None = None
+    resource_usage: ResourceUsage | None = None
 
 
 class EffectRecord(BaseModel):
