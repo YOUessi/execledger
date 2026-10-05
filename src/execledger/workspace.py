@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from execledger.blobstore import BlobNotFound, BlobStore, BlobStoreError
+from execledger.locking import exclusive_file_lock
 from execledger.models import (
     ExecutionSpec,
     FileChange,
@@ -40,6 +41,7 @@ class WorkspaceManager:
         self.store = store
         state_root = self.root.parent
         self.blobs = BlobStore(blob_root or state_root / "blobs")
+        self.maintenance_lock_path = state_root / ".blob-maintenance.lock"
         self.restore_root = (restore_root or state_root / "restores").resolve()
         self.restore_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -70,23 +72,33 @@ class WorkspaceManager:
         return target
 
     def snapshot(self, execution_id: str, phase: str) -> SnapshotRecord:
-        target = self.directory(execution_id)
-        manifest: list[dict[str, object]] = []
-        if target.exists():
-            for path in sorted(p for p in target.rglob("*") if p.is_file() and not p.is_symlink()):
-                relative = path.relative_to(target).as_posix()
-                data = path.read_bytes()
-                digest = self.blobs.put(data)
-                manifest.append(
-                    {
-                        "path": relative,
-                        "size": len(data),
-                        "sha256": digest,
-                    }
+        with exclusive_file_lock(self.maintenance_lock_path):
+            target = self.directory(execution_id)
+            manifest: list[dict[str, object]] = []
+            if target.exists():
+                paths = sorted(
+                    path
+                    for path in target.rglob("*")
+                    if path.is_file() and not path.is_symlink()
                 )
-        encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-        digest = hashlib.sha256(encoded).hexdigest()
-        return self.store.add_snapshot(execution_id, phase, digest, manifest)
+                for path in paths:
+                    relative = path.relative_to(target).as_posix()
+                    data = path.read_bytes()
+                    digest = self.blobs.put(data)
+                    manifest.append(
+                        {
+                            "path": relative,
+                            "size": len(data),
+                            "sha256": digest,
+                        }
+                    )
+            encoded = json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest = hashlib.sha256(encoded).hexdigest()
+            return self.store.add_snapshot(execution_id, phase, digest, manifest)
 
     def _validated_manifest(
         self,
@@ -174,47 +186,48 @@ class WorkspaceManager:
         )
 
     def restore(self, execution_id: str, snapshot_id: str) -> RestoreRecord:
-        snapshot = self.store.get_snapshot(execution_id, snapshot_id)
-        manifest = self._validated_manifest(snapshot)
-        restore_id = uuid.uuid4().hex
-        target = self.restore_root / restore_id
-        target.mkdir(mode=0o700, parents=False, exist_ok=False)
+        with exclusive_file_lock(self.maintenance_lock_path):
+            snapshot = self.store.get_snapshot(execution_id, snapshot_id)
+            manifest = self._validated_manifest(snapshot)
+            restore_id = uuid.uuid4().hex
+            target = self.restore_root / restore_id
+            target.mkdir(mode=0o700, parents=False, exist_ok=False)
 
-        try:
-            for name, (digest, expected_size) in sorted(manifest.items()):
-                relative = self.validate_relative(name)
-                try:
-                    data = self.blobs.get(digest)
-                except (BlobNotFound, BlobStoreError) as exc:
-                    raise SnapshotNotRestorable(
-                        f"snapshot blob unavailable: {digest}"
-                    ) from exc
-                if len(data) != expected_size:
-                    raise SnapshotNotRestorable(
-                        f"snapshot blob size mismatch: {digest}"
-                    )
-                path = target.joinpath(*relative.parts)
-                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                path.write_bytes(data)
-                os.chmod(path, 0o600)
-        except Exception:
-            shutil.rmtree(target, ignore_errors=True)
-            raise
+            try:
+                for name, (digest, expected_size) in sorted(manifest.items()):
+                    relative = self.validate_relative(name)
+                    try:
+                        data = self.blobs.get(digest)
+                    except (BlobNotFound, BlobStoreError) as exc:
+                        raise SnapshotNotRestorable(
+                            f"snapshot blob unavailable: {digest}"
+                        ) from exc
+                    if len(data) != expected_size:
+                        raise SnapshotNotRestorable(
+                            f"snapshot blob size mismatch: {digest}"
+                        )
+                    path = target.joinpath(*relative.parts)
+                    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    os.chmod(path, 0o600)
+            except Exception:
+                shutil.rmtree(target, ignore_errors=True)
+                raise
 
-        self.store.add_effect(
-            execution_id,
-            "snapshot_restored",
-            {
-                "snapshot_id": snapshot.id,
-                "restore_id": restore_id,
-                "file_count": len(manifest),
-            },
-        )
-        return RestoreRecord(
-            id=restore_id,
-            execution_id=execution_id,
-            snapshot_id=snapshot.id,
-            directory=str(target),
-            file_count=len(manifest),
-            snapshot_digest=snapshot.digest,
-        )
+            self.store.add_effect(
+                execution_id,
+                "snapshot_restored",
+                {
+                    "snapshot_id": snapshot.id,
+                    "restore_id": restore_id,
+                    "file_count": len(manifest),
+                },
+            )
+            return RestoreRecord(
+                id=restore_id,
+                execution_id=execution_id,
+                snapshot_id=snapshot.id,
+                directory=str(target),
+                file_count=len(manifest),
+                snapshot_digest=snapshot.digest,
+            )
