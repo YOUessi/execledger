@@ -146,6 +146,12 @@ function renderExecution() {
   $("metric-attempt").textContent = record.attempt;
   $("metric-worker").textContent = record.worker_id || "—";
   $("metric-exit").textContent = record.exit_code ?? "—";
+  $("metric-wall").textContent = record.resource_usage
+    ? `${record.resource_usage.wall_time_seconds.toFixed(3)} s`
+    : "—";
+  $("metric-rss").textContent = record.resource_usage
+    ? formatBytes(record.resource_usage.max_rss_bytes)
+    : "—";
   $("metric-created").textContent = formatTime(record.created_at);
   $("request-spec").textContent = JSON.stringify(record.spec, null, 2);
   $("cancel-job").disabled = terminalStates.has(record.status);
@@ -575,6 +581,11 @@ function loadExample() {
     files: {"input.txt": "hello from ExecLedger console"},
     timeout_seconds: 10,
     max_output_bytes: 65536,
+    resource_limits: {
+      max_cpu_seconds: 10,
+      max_memory_bytes: 268435456,
+      max_file_bytes: 67108864
+    }
   }, null, 2);
 }
 
